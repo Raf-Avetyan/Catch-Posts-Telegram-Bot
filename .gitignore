@@ -1,0 +1,27 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+
+# Secrets and env
+.env
+
+# Telegram sessions
+*.session
+*.session-journal
+
+# Runtime data
+media/
+database.db
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Login artifacts
+telegram_login_qr.png
