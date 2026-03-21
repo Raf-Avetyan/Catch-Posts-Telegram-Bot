@@ -767,17 +767,11 @@ class TwitterCollector:
                 text=full_html,
                 media_paths=temp_media_paths,
                 parse_mode="html",
-                buttons=None,
+                buttons=publish_buttons,
             )
             print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
 
             if publish_token and main_message_id:
-                await self.bot_client.send_message(
-                    forward_to_channel,
-                    "PUBLISH",
-                    buttons=publish_buttons,
-                    reply_to=main_message_id,
-                )
                 self._publish_jobs[publish_token] = {
                     "channel": forward_to_channel,
                     "message_id": main_message_id,
@@ -888,9 +882,6 @@ class TwitterCollector:
             return
 
         hype_score = int(job.get("hype_score") or 0)
-        if hype_score < self.clean_min_hype_score:
-            await event.answer(f"Score {hype_score}/10 is below clean threshold {self.clean_min_hype_score}/10.", alert=True)
-            return
 
         source_channel = str(job.get("channel") or forward_to_channel)
         clean_channel = str(job.get("clean_channel") or "")
