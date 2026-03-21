@@ -31,7 +31,6 @@ api_hash = os.getenv("TELEGRAM_API_HASH", "your_api_hash")
 
 # Public channel usernames (with or without @) or numeric IDs
 channels_to_monitor = [
-    "testchannelcatchposts",
     "cointelegraph",
     "WatcherGuru",
     "AshCryptoTG"
@@ -48,7 +47,7 @@ forwarding_enabled = bool(bot_token and forward_to_channel)
 
 # Gemini rewrite settings
 gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
-gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 DB_PATH = BASE_DIR / "database.db"
 MEDIA_DIR = BASE_DIR / "media"
