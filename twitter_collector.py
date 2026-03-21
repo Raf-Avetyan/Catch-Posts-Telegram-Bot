@@ -8,6 +8,7 @@ import tempfile
 import json
 import re
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional
 from urllib import error, request
@@ -92,7 +93,7 @@ try:
 except Exception:
     sntwitter = None  # type: ignore[assignment]
 
-from telethon import TelegramClient
+from telethon import Button, TelegramClient, events
 
 from config import (
     api_hash,
@@ -159,6 +160,7 @@ class TwitterCollector:
         self.last_seen_tweet_id: Dict[str, int] = {}
         self._twikit_disabled_until_ts = 0.0
         self._snscrape_unavailable_logged = False
+        self._publish_jobs: Dict[str, Dict[str, Any]] = {}
 
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
@@ -390,6 +392,7 @@ class TwitterCollector:
         try:
             self.bot_client = TelegramClient(twitter_bot_session_name, api_id, api_hash)
             await self.bot_client.start(bot_token=bot_token)
+            self.bot_client.add_event_handler(self._on_publish_click, events.CallbackQuery(pattern=b"^pub:"))
             print(f"[X][INFO] Twitter forwarding target: {forward_to_channel}")
         except Exception as exc:
             self.bot_client = None
@@ -404,6 +407,114 @@ class TwitterCollector:
     @staticmethod
     def _chunks(items: List[str], size: int) -> List[List[str]]:
         return [items[i : i + size] for i in range(0, len(items), size)]
+
+    @staticmethod
+    def _strip_publish_meta_lines(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        lines = value.splitlines()
+        while lines and not lines[-1].strip():
+            lines.pop()
+        patterns = [
+            re.compile(r"^Hype Score:\s*(10|[1-9])/10$", re.IGNORECASE),
+            re.compile(r"^@\w{1,30}$"),
+            re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+\-]\d{2}:\d{2})?$"),
+        ]
+        removed = True
+        while lines and removed:
+            removed = False
+            tail = lines[-1].strip()
+            for pattern in patterns:
+                if pattern.match(tail):
+                    lines.pop()
+                    removed = True
+                    while lines and not lines[-1].strip():
+                        lines.pop()
+                    break
+        return "\n".join(lines).strip()
+
+    async def _send_to_channel_media_first(
+        self,
+        target_channel: str,
+        text: str,
+        media_paths: List[str],
+        parse_mode: Optional[str] = None,
+        buttons: Optional[Any] = None,
+    ) -> Optional[int]:
+        if not self.bot_client:
+            return None
+
+        first_message_id: Optional[int] = None
+        if media_paths:
+            remaining = text or ""
+            caption_sent = False
+            for batch in self._chunks(media_paths, 10):
+                files = batch if len(batch) > 1 else batch[0]
+                caption = None
+                btns = None
+                pm = None
+                if not caption_sent and remaining:
+                    if len(remaining) <= 1024:
+                        caption = remaining
+                        remaining = ""
+                    else:
+                        cut_at = remaining.rfind("\n", 0, 1024)
+                        if cut_at < 120:
+                            cut_at = 1024
+                        caption = remaining[:cut_at].strip()
+                        remaining = remaining[cut_at:].lstrip()
+                    caption_sent = True
+                    if caption and parse_mode:
+                        pm = parse_mode
+                if first_message_id is None and buttons is not None:
+                    btns = buttons
+
+                try:
+                    sent = await self.bot_client.send_file(
+                        target_channel,
+                        files,
+                        caption=caption,
+                        parse_mode=pm,
+                        buttons=btns,
+                    )
+                except Exception as media_exc:
+                    if "Failure while processing image" in str(media_exc):
+                        sent = await self.bot_client.send_file(
+                            target_channel,
+                            files,
+                            caption=caption,
+                            parse_mode=pm,
+                            buttons=btns,
+                            force_document=True,
+                        )
+                    else:
+                        raise
+
+                if first_message_id is None:
+                    if isinstance(sent, list) and sent:
+                        first_message_id = sent[0].id
+                    elif hasattr(sent, "id"):
+                        first_message_id = sent.id
+
+            if remaining:
+                msg = await self.bot_client.send_message(
+                    target_channel,
+                    remaining,
+                    parse_mode=parse_mode,
+                    buttons=buttons if first_message_id is None else None,
+                )
+                if first_message_id is None:
+                    first_message_id = msg.id
+        elif text:
+            msg = await self.bot_client.send_message(
+                target_channel,
+                text,
+                parse_mode=parse_mode,
+                buttons=buttons,
+            )
+            first_message_id = msg.id
+        return first_message_id
 
     def _download_media_urls_to_temp(self, media_urls: List[str]) -> List[str]:
         paths: List[str] = []
@@ -490,8 +601,7 @@ class TwitterCollector:
         score_input = clean_text or (text or "")
         hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
         send_main = hype_score >= self.min_hype_score
-        send_clean = bool(self.clean_forward_channel) and hype_score >= self.clean_min_hype_score
-        if not send_main and not send_clean:
+        if not send_main:
             print(
                 f"[X][SKIP] @{username} score={hype_score}/10 below thresholds "
                 f"main={self.min_hype_score}/10 clean={self.clean_min_hype_score}/10"
@@ -523,81 +633,31 @@ class TwitterCollector:
 
         temp_media_paths = await asyncio.to_thread(self._download_media_urls_to_temp, media_urls)
         try:
-            if send_main:
-                if temp_media_paths:
-                    remaining_html = full_html
-                    caption_sent = False
-                    for batch in self._chunks(temp_media_paths, 10):
-                        files = batch if len(batch) > 1 else batch[0]
-                        caption = None
-                        parse_mode = None
-                        if not caption_sent and remaining_html:
-                            if len(remaining_html) <= 1024:
-                                caption = remaining_html
-                                remaining_html = ""
-                            else:
-                                cut_at = remaining_html.rfind("\n", 0, 1024)
-                                if cut_at < 120:
-                                    cut_at = 1024
-                                caption = remaining_html[:cut_at].strip()
-                                remaining_html = remaining_html[cut_at:].lstrip()
-                            caption_sent = True
-                            if caption:
-                                parse_mode = "html"
+            publish_buttons = None
+            publish_token = None
+            if self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
+                publish_token = uuid.uuid4().hex[:16]
+                publish_buttons = [[Button.inline("PUBLISH", data=f"pub:{publish_token}".encode("utf-8"))]]
 
-                        try:
-                            await self.bot_client.send_file(
-                                forward_to_channel,
-                                files,
-                                caption=caption,
-                                parse_mode=parse_mode,
-                            )
-                        except Exception as media_exc:
-                            # Some Twitter assets are not valid Telegram "photo" payloads (or have mismatched MIME).
-                            # Retry as documents so forwarding still succeeds.
-                            if "Failure while processing image" in str(media_exc):
-                                print(f"[X][WARN] Media upload as image failed for @{username}; retrying as document.")
-                                await self.bot_client.send_file(
-                                    forward_to_channel,
-                                    files,
-                                    caption=caption,
-                                    parse_mode=parse_mode,
-                                    force_document=True,
-                                )
-                            else:
-                                raise
+            main_message_id = await self._send_to_channel_media_first(
+                target_channel=forward_to_channel,
+                text=full_html,
+                media_paths=temp_media_paths,
+                parse_mode="html",
+                buttons=publish_buttons,
+            )
+            print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
 
-                    if remaining_html:
-                        for chunk in self._split_text(remaining_html):
-                            await self.bot_client.send_message(forward_to_channel, chunk, parse_mode="html")
-                elif full_html:
-                    for chunk in self._split_text(full_html):
-                        await self.bot_client.send_message(forward_to_channel, chunk, parse_mode="html")
-
-                print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
-            else:
-                print(
-                    f"[X][SKIP] @{username} score={hype_score}/10 below main threshold "
-                    f"{self.min_hype_score}/10"
-                )
-
-            # Optional second channel: clean publish (media + main text/hashtags only).
-            if (
-                send_clean
-                and self.clean_forward_channel
-                and self.clean_forward_channel != forward_to_channel
-            ):
-                await self._forward_clean_copy(
-                    username=username,
-                    target_channel=self.clean_forward_channel,
-                    text=(clean_text or "").strip(),
-                    media_paths=temp_media_paths,
-                )
-            elif self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
-                print(
-                    f"[X][SKIP-CLEAN] @{username} score={hype_score}/10 below clean threshold "
-                    f"{self.clean_min_hype_score}/10"
-                )
+            if publish_token and main_message_id:
+                self._publish_jobs[publish_token] = {
+                    "channel": forward_to_channel,
+                    "message_id": main_message_id,
+                    "username": username,
+                    "hype_score": hype_score,
+                    "clean_channel": self.clean_forward_channel,
+                    "published": False,
+                }
+                print(f"[X][INFO] Publish button attached for @{username} (token={publish_token}).")
         except Exception as exc:
             print(f"[X][ERROR] Forwarding tweet failed @{username}: {exc}")
         finally:
@@ -650,6 +710,89 @@ class TwitterCollector:
             print(f"[X][FORWARDED-CLEAN] @{username} -> {target_channel}")
         except Exception as exc:
             print(f"[X][ERROR] Clean forward failed @{username} -> {target_channel}: {exc}")
+
+    async def _on_publish_click(self, event: events.CallbackQuery.Event) -> None:
+        if not self.bot_client:
+            return
+        data = (event.data or b"").decode("utf-8", errors="ignore")
+        if not data.startswith("pub:"):
+            return
+        token = data.split(":", 1)[1].strip()
+        if not token:
+            await event.answer("Invalid publish token.", alert=True)
+            return
+        job = self._publish_jobs.get(token)
+        if not job:
+            await event.answer("Publish data expired. Repost latest tweet.", alert=True)
+            return
+        if job.get("published"):
+            await event.answer("Already published.", alert=True)
+            return
+
+        hype_score = int(job.get("hype_score") or 0)
+        if hype_score < self.clean_min_hype_score:
+            await event.answer(f"Score {hype_score}/10 is below clean threshold {self.clean_min_hype_score}/10.", alert=True)
+            return
+
+        source_channel = str(job.get("channel") or forward_to_channel)
+        clean_channel = str(job.get("clean_channel") or "")
+        message_id = int(job.get("message_id") or 0)
+        username = str(job.get("username") or "")
+        if not clean_channel or not message_id:
+            await event.answer("Missing publish target.", alert=True)
+            return
+
+        try:
+            source_msg = await self.bot_client.get_messages(source_channel, ids=message_id)
+            if isinstance(source_msg, list):
+                source_msg = source_msg[0] if source_msg else None
+            if not source_msg:
+                await event.answer("Source message not found.", alert=True)
+                return
+
+            text_value = (getattr(source_msg, "raw_text", None) or getattr(source_msg, "text", None) or "").strip()
+            clean_text = self._strip_publish_meta_lines(text_value)
+
+            media_paths: List[str] = []
+            grouped_id = getattr(source_msg, "grouped_id", None)
+            if grouped_id:
+                from_id = max(1, int(source_msg.id) - 30)
+                to_id = int(source_msg.id) + 30
+                near_ids = list(range(from_id, to_id + 1))
+                near_msgs = await self.bot_client.get_messages(source_channel, ids=near_ids)
+                if not isinstance(near_msgs, list):
+                    near_msgs = [near_msgs] if near_msgs else []
+                media_msgs = [
+                    m for m in near_msgs
+                    if m is not None and getattr(m, "grouped_id", None) == grouped_id and getattr(m, "media", None)
+                ]
+                media_msgs = sorted(media_msgs, key=lambda m: int(m.id))
+            else:
+                media_msgs = [source_msg] if getattr(source_msg, "media", None) else []
+
+            for m in media_msgs:
+                path = await self.bot_client.download_media(m, file=tempfile.gettempdir())
+                if isinstance(path, str) and os.path.exists(path):
+                    media_paths.append(path)
+
+            await self._forward_clean_copy(
+                username=username,
+                target_channel=clean_channel,
+                text=clean_text,
+                media_paths=media_paths,
+            )
+            job["published"] = True
+            await event.answer("Published to clean channel.", alert=False)
+        except Exception as exc:
+            print(f"[X][ERROR] Publish callback failed token={token}: {exc}")
+            await event.answer("Publish failed. Check logs.", alert=True)
+        finally:
+            for p in locals().get("media_paths", []):
+                try:
+                    if isinstance(p, str) and os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
 
     async def _fetch_user_tweets(self, username: str) -> List[Any]:
         if self.twikit_only:
