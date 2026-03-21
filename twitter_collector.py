@@ -481,53 +481,105 @@ class TwitterCollector:
         if media_paths:
             remaining = text or ""
             caption_sent = False
-            for path in media_paths:
-                caption = None
-                btns = None
-                pm = None
-                if not caption_sent and remaining:
-                    if len(remaining) <= 1024:
-                        caption = remaining
-                        remaining = ""
-                    else:
-                        cut_at = remaining.rfind("\n", 0, 1024)
-                        if cut_at < 120:
-                            cut_at = 1024
-                        caption = remaining[:cut_at].strip()
-                        remaining = remaining[cut_at:].lstrip()
-                    caption_sent = True
-                    if caption and parse_mode:
-                        pm = parse_mode
-                if first_message_id is None and buttons is not None:
-                    btns = buttons
+            contains_video = any(_is_video_file(p) for p in media_paths)
 
-                try:
-                    sent = await self.bot_client.send_file(
-                        target_channel,
-                        path,
-                        caption=caption,
-                        parse_mode=pm,
-                        buttons=btns,
-                        supports_streaming=_is_video_file(path),
-                    )
-                except Exception as media_exc:
-                    if "Failure while processing image" in str(media_exc):
+            # Image-only posts: send as albums so all images stay in one post.
+            if not contains_video:
+                for batch in self._chunks(media_paths, 10):
+                    caption = None
+                    btns = None
+                    pm = None
+                    if not caption_sent and remaining:
+                        if len(remaining) <= 1024:
+                            caption = remaining
+                            remaining = ""
+                        else:
+                            cut_at = remaining.rfind("\n", 0, 1024)
+                            if cut_at < 120:
+                                cut_at = 1024
+                            caption = remaining[:cut_at].strip()
+                            remaining = remaining[cut_at:].lstrip()
+                        caption_sent = True
+                        if caption and parse_mode:
+                            pm = parse_mode
+                    if first_message_id is None and buttons is not None:
+                        btns = buttons
+
+                    try:
+                        sent = await self.bot_client.send_file(
+                            target_channel,
+                            batch,
+                            caption=caption,
+                            parse_mode=pm,
+                            buttons=btns,
+                        )
+                    except Exception as media_exc:
+                        if "Failure while processing image" in str(media_exc):
+                            sent = await self.bot_client.send_file(
+                                target_channel,
+                                batch,
+                                caption=caption,
+                                parse_mode=pm,
+                                buttons=btns,
+                                force_document=True,
+                            )
+                        else:
+                            raise
+
+                    if first_message_id is None:
+                        if isinstance(sent, list) and sent:
+                            first_message_id = sent[0].id
+                        elif hasattr(sent, "id"):
+                            first_message_id = sent.id
+            else:
+                # Mixed/video posts: send per-file to preserve video behavior.
+                for path in media_paths:
+                    caption = None
+                    btns = None
+                    pm = None
+                    if not caption_sent and remaining:
+                        if len(remaining) <= 1024:
+                            caption = remaining
+                            remaining = ""
+                        else:
+                            cut_at = remaining.rfind("\n", 0, 1024)
+                            if cut_at < 120:
+                                cut_at = 1024
+                            caption = remaining[:cut_at].strip()
+                            remaining = remaining[cut_at:].lstrip()
+                        caption_sent = True
+                        if caption and parse_mode:
+                            pm = parse_mode
+                    if first_message_id is None and buttons is not None:
+                        btns = buttons
+
+                    try:
                         sent = await self.bot_client.send_file(
                             target_channel,
                             path,
                             caption=caption,
                             parse_mode=pm,
                             buttons=btns,
-                            force_document=True,
+                            supports_streaming=_is_video_file(path),
                         )
-                    else:
-                        raise
+                    except Exception as media_exc:
+                        if "Failure while processing image" in str(media_exc):
+                            sent = await self.bot_client.send_file(
+                                target_channel,
+                                path,
+                                caption=caption,
+                                parse_mode=pm,
+                                buttons=btns,
+                                force_document=True,
+                            )
+                        else:
+                            raise
 
-                if first_message_id is None:
-                    if isinstance(sent, list) and sent:
-                        first_message_id = sent[0].id
-                    elif hasattr(sent, "id"):
-                        first_message_id = sent.id
+                    if first_message_id is None:
+                        if isinstance(sent, list) and sent:
+                            first_message_id = sent[0].id
+                        elif hasattr(sent, "id"):
+                            first_message_id = sent.id
 
             if remaining:
                 msg = await self.bot_client.send_message(
@@ -729,29 +781,51 @@ class TwitterCollector:
             if media_paths:
                 remaining = text
                 caption_sent = False
-                for path in media_paths:
-                    caption = None
-                    if not caption_sent and remaining:
-                        caption = remaining[:1024]
-                        remaining = remaining[1024:].lstrip()
-                        caption_sent = True
-                    try:
-                        await self.bot_client.send_file(
-                            target_channel,
-                            path,
-                            caption=caption,
-                            supports_streaming=_is_video_file(path),
-                        )
-                    except Exception as media_exc:
-                        if "Failure while processing image" in str(media_exc):
+                contains_video = any(_is_video_file(p) for p in media_paths)
+
+                if not contains_video:
+                    for batch in self._chunks(media_paths, 10):
+                        caption = None
+                        if not caption_sent and remaining:
+                            caption = remaining[:1024]
+                            remaining = remaining[1024:].lstrip()
+                            caption_sent = True
+                        try:
+                            await self.bot_client.send_file(target_channel, batch, caption=caption)
+                        except Exception as media_exc:
+                            if "Failure while processing image" in str(media_exc):
+                                await self.bot_client.send_file(
+                                    target_channel,
+                                    batch,
+                                    caption=caption,
+                                    force_document=True,
+                                )
+                            else:
+                                raise
+                else:
+                    for path in media_paths:
+                        caption = None
+                        if not caption_sent and remaining:
+                            caption = remaining[:1024]
+                            remaining = remaining[1024:].lstrip()
+                            caption_sent = True
+                        try:
                             await self.bot_client.send_file(
                                 target_channel,
                                 path,
                                 caption=caption,
-                                force_document=True,
+                                supports_streaming=_is_video_file(path),
                             )
-                        else:
-                            raise
+                        except Exception as media_exc:
+                            if "Failure while processing image" in str(media_exc):
+                                await self.bot_client.send_file(
+                                    target_channel,
+                                    path,
+                                    caption=caption,
+                                    force_document=True,
+                                )
+                            else:
+                                raise
 
                 if remaining:
                     for chunk in self._split_text(remaining):
