@@ -1,3 +1,6 @@
 telethon>=1.36.0,<2.0.0
 qrcode>=8.0
 Pillow>=10.0.0
+twscrape>=0.17.0
+twikit>=2.3.0
+snscrape>=0.7.0.20230622

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import re
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
@@ -6,8 +6,8 @@ from typing import Iterable, List, Optional, Sequence
 from telethon import TelegramClient, events
 from telethon import utils as telethon_utils
 from telethon.errors import RPCError
-from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 
 from config import (
@@ -67,7 +67,6 @@ class TelegramChannelListener:
             await self.client(JoinChannelRequest(channel_ref))
             print(f"[INFO] Joined channel for updates: {channel_ref}")
         except Exception:
-            # Already joined, private, or join restricted: ignore and continue.
             pass
 
     async def _resolve_channels(self, channels: Sequence[str]) -> List[str]:
@@ -233,14 +232,31 @@ class TelegramChannelListener:
             return
 
         media_paths_list = list(media_paths)
-        clean_text = text.strip()
+        clean_text = self.rewriter.clean_footer_text(text)
         if clean_text and self.rewriter.enabled:
             rewritten = await asyncio.to_thread(self.rewriter.rewrite, clean_text)
-            clean_text = rewritten.strip() if rewritten else clean_text
+            if rewritten:
+                rewritten_clean = self.rewriter.clean_footer_text(rewritten)
+                if rewritten_clean and rewritten_clean != clean_text:
+                    clean_text = rewritten_clean
+                    print("[INFO] Post text rewritten by Gemini.")
+                else:
+                    print("[WARN] Gemini returned same/empty rewrite. Original text used.")
+            else:
+                print("[WARN] Gemini rewrite failed (no response). Original text used.")
+        elif clean_text and not self.rewriter.enabled:
+            print("[WARN] Gemini rewrite disabled. Original text used.")
+        elif not clean_text:
+            print("[INFO] No post text to rewrite (media-only post).")
+
+        score_input = clean_text or (text or "")
+        hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
+        score_line = f"Hype Score: {hype_score}/10"
+        quoted_meta = f"> {score_line}"
+        clean_text = f"{clean_text}\n\n{quoted_meta}".strip() if clean_text else quoted_meta
 
         try:
             if media_paths_list:
-                # Preserve post-style sending: media first, caption as text.
                 caption_sent = False
                 for batch in self._chunks(media_paths_list, 10):
                     files = batch if len(batch) > 1 else batch[0]
