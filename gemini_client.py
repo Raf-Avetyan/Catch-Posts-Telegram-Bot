@@ -101,7 +101,7 @@ class GeminiRewriter:
             "Keep exact meaning, facts, links, and emojis. "
             "Do not add or remove facts. "
             "Do not change the core message. "
-            "If there is a headline-style label, use BREAKING or LATEST only. Never use KEY. "
+            "If original post starts with a headline-style lead word (for example IMPORTANT/BREAKING/LATEST), preserve that lead word. "
             "At the very top, ensure a one-word uppercase lead label with an emoji in this format: "
             "EMOJI WORD:, then one empty line, then the post body. "
             "Do not include source/footer labels. "
@@ -158,7 +158,7 @@ class GeminiRewriter:
                 result = self.clean_footer_text(safer.strip()) or result
 
         result = self._normalize_lead_label(result)
-        result = self._ensure_lead_banner_block(result)
+        result = self._ensure_lead_banner_block(result, original)
         return self._ensure_three_hashtags(result, original)
 
     def get_hype_score(self, text: str) -> int:
@@ -318,34 +318,80 @@ class GeminiRewriter:
         return "LATEST"
 
     @staticmethod
+    def _extract_lead_from_text(text: str) -> tuple[str, str]:
+        value = (text or "").strip()
+        if not value:
+            return "", ""
+        first = value.splitlines()[0].strip()
+        emoji_match = re.match(
+            r"^(?P<emoji>(?:(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF])\s*)+)?(?P<rest>.*)$",
+            first,
+            flags=re.UNICODE,
+        )
+        emoji = ((emoji_match.group("emoji") if emoji_match else "") or "").strip()
+        rest = ((emoji_match.group("rest") if emoji_match else first) or "").strip()
+
+        # Explicit labeled styles: WORD: ... / WORD - ...
+        explicit = re.match(r"^(?P<label>[A-Za-z][A-Za-z0-9]{2,24})\s*[:\-]\s*", rest)
+        if explicit:
+            return emoji, explicit.group("label").upper().strip()
+
+        # Known lead words without separator, e.g. "BREAKING Bitcoin..."
+        known = [
+            "BREAKING",
+            "LATEST",
+            "HOT",
+            "BIG",
+            "IMPORTANT",
+            "ALERT",
+            "UPDATE",
+            "NEWS",
+        ]
+        for word in known:
+            if re.match(rf"^{word}\b", rest, flags=re.IGNORECASE):
+                return emoji, word
+
+        # Uppercase lead token without separator, e.g. "IMPORTANT ..."
+        caps = re.match(r"^(?P<label>[A-Z][A-Z0-9]{2,24})\b", rest)
+        if caps:
+            return emoji, caps.group("label").upper().strip()
+
+        return emoji, ""
+
+    @staticmethod
     def _emoji_for_lead(word: str) -> str:
         mapping = {
             "BREAKING": "🚨",
             "LATEST": "📰",
             "HOT": "🔥",
             "BIG": "⚡",
+            "IMPORTANT": "🚨",
+            "ALERT": "🚨",
+            "UPDATE": "📰",
         }
         return mapping.get(word, "📰")
 
-    def _ensure_lead_banner_block(self, text: str) -> str:
+    def _ensure_lead_banner_block(self, text: str, source_text: str = "") -> str:
         value = (text or "").strip()
         if not value:
             return value
 
+        src_emoji, src_label = self._extract_lead_from_text(source_text)
         lines = value.splitlines()
         first = lines[0].strip() if lines else ""
         rest = "\n".join(lines[1:]).strip()
 
         lead_re = re.compile(
-            r"^(?P<prefix>[^\w\s]{1,4}\s*)?(?P<label>BREAKING|LATEST|HOT|BIG|ALERT|UPDATE|NEWS)\s*[:\-]?\s*(?P<tail>.*)$",
+            r"^(?P<prefix>(?:(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF])\s*)+)?"
+            r"(?P<label>[A-Za-z][A-Za-z0-9]{2,24})\s*[:\-]\s*(?P<tail>.*)$",
             flags=re.IGNORECASE,
         )
         m = lead_re.match(first)
         if m:
-            raw_label = (m.group("label") or "").upper()
-            label = {"ALERT": "BREAKING", "UPDATE": "LATEST", "NEWS": "LATEST"}.get(raw_label, raw_label)
+            raw_label = (m.group("label") or "").upper().strip()
+            label = src_label or raw_label
             prefix = (m.group("prefix") or "").strip()
-            emoji = prefix if prefix else self._emoji_for_lead(label)
+            emoji = src_emoji or prefix or self._emoji_for_lead(label)
             tail = (m.group("tail") or "").strip()
 
             body_parts = []
@@ -356,9 +402,21 @@ class GeminiRewriter:
             body = "\n".join(body_parts).strip()
             return f"{emoji} {label}:\n\n{body}".strip()
 
-        label = self._choose_lead_word(value)
-        emoji = self._emoji_for_lead(label)
-        return f"{emoji} {label}:\n\n{value}".strip()
+        # If rewritten first line has a known lead without separator, remove it from body and normalize style.
+        inferred_emoji, inferred_label = self._extract_lead_from_text(value)
+        label = src_label or inferred_label or self._choose_lead_word(value)
+        emoji = src_emoji or inferred_emoji or self._emoji_for_lead(label)
+        body_value = value
+        if inferred_label:
+            body_value = re.sub(
+                rf"^(?:(?:[\U0001F1E6-\U0001F1FF]{{2}}|[\U0001F300-\U0001FAFF])\s*)*{re.escape(inferred_label)}\b[:\-]?\s*",
+                "",
+                value,
+                flags=re.IGNORECASE,
+            ).strip()
+            if not body_value:
+                body_value = value
+        return f"{emoji} {label}:\n\n{body_value}".strip()
 
     def _extract_image_urls(self, text: str) -> List[str]:
         urls = re.findall(r"https?://[^\s\"'<>]+", text or "")

@@ -60,8 +60,9 @@ twitter_usernames = [
 ]
 twitter_poll_seconds = int(os.getenv("TWITTER_POLL_SECONDS", "300"))
 twitter_fetch_limit = int(os.getenv("TWITTER_FETCH_LIMIT", "1"))
-twitter_min_hype_score = int(os.getenv("TWITTER_MIN_HYPE_SCORE", "6"))
+twitter_min_hype_score = int(os.getenv("TWITTER_MIN_HYPE_SCORE", "5"))
 twitter_clean_forward_channel = os.getenv("TWITTER_CLEAN_FORWARD_CHANNEL", "").strip()
+twitter_clean_min_hype_score = int(os.getenv("TWITTER_CLEAN_MIN_HYPE_SCORE", "6"))
 twscrape_accounts_db = BASE_DIR / os.getenv("TWITTER_ACCOUNTS_DB", "twitter_accounts.db")
 twikit_cookies_path = BASE_DIR / os.getenv("TWIKIT_COOKIES_FILE", "twikit_cookies.json")
 twitter_bot_session_name = os.getenv("TWITTER_BOT_SESSION_NAME", "twitter_forwarder_bot")

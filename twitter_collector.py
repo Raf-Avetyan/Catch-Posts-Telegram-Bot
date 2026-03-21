@@ -109,6 +109,7 @@ from config import (
     twitter_account_username,
     twitter_enabled,
     twitter_fetch_limit,
+    twitter_clean_min_hype_score,
     twitter_clean_forward_channel,
     twitter_min_hype_score,
     twitter_poll_seconds,
@@ -149,6 +150,7 @@ class TwitterCollector:
         self.poll_seconds = max(30, twitter_poll_seconds)
         self.fetch_limit = max(1, twitter_fetch_limit)
         self.min_hype_score = min(10, max(1, twitter_min_hype_score))
+        self.clean_min_hype_score = min(10, max(1, twitter_clean_min_hype_score))
         self.clean_forward_channel = twitter_clean_forward_channel
         self._ready = False
         self.rewriter = GeminiRewriter(api_key=gemini_api_key, model=gemini_model)
@@ -487,10 +489,12 @@ class TwitterCollector:
         clean_text = self._strip_author_profile_links(clean_text, username)
         score_input = clean_text or (text or "")
         hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
-        if hype_score < self.min_hype_score:
+        send_main = hype_score >= self.min_hype_score
+        send_clean = bool(self.clean_forward_channel) and hype_score >= self.clean_min_hype_score
+        if not send_main and not send_clean:
             print(
-                f"[X][SKIP] @{username} score={hype_score}/10 below threshold "
-                f"{self.min_hype_score}/10"
+                f"[X][SKIP] @{username} score={hype_score}/10 below thresholds "
+                f"main={self.min_hype_score}/10 clean={self.clean_min_hype_score}/10"
             )
             return
 
@@ -519,61 +523,68 @@ class TwitterCollector:
 
         temp_media_paths = await asyncio.to_thread(self._download_media_urls_to_temp, media_urls)
         try:
-            if temp_media_paths:
-                remaining_html = full_html
-                caption_sent = False
-                for batch in self._chunks(temp_media_paths, 10):
-                    files = batch if len(batch) > 1 else batch[0]
-                    caption = None
-                    parse_mode = None
-                    if not caption_sent and remaining_html:
-                        if len(remaining_html) <= 1024:
-                            caption = remaining_html
-                            remaining_html = ""
-                        else:
-                            cut_at = remaining_html.rfind("\n", 0, 1024)
-                            if cut_at < 120:
-                                cut_at = 1024
-                            caption = remaining_html[:cut_at].strip()
-                            remaining_html = remaining_html[cut_at:].lstrip()
-                        caption_sent = True
-                        if caption:
-                            parse_mode = "html"
+            if send_main:
+                if temp_media_paths:
+                    remaining_html = full_html
+                    caption_sent = False
+                    for batch in self._chunks(temp_media_paths, 10):
+                        files = batch if len(batch) > 1 else batch[0]
+                        caption = None
+                        parse_mode = None
+                        if not caption_sent and remaining_html:
+                            if len(remaining_html) <= 1024:
+                                caption = remaining_html
+                                remaining_html = ""
+                            else:
+                                cut_at = remaining_html.rfind("\n", 0, 1024)
+                                if cut_at < 120:
+                                    cut_at = 1024
+                                caption = remaining_html[:cut_at].strip()
+                                remaining_html = remaining_html[cut_at:].lstrip()
+                            caption_sent = True
+                            if caption:
+                                parse_mode = "html"
 
-                    try:
-                        await self.bot_client.send_file(
-                            forward_to_channel,
-                            files,
-                            caption=caption,
-                            parse_mode=parse_mode,
-                        )
-                    except Exception as media_exc:
-                        # Some Twitter assets are not valid Telegram "photo" payloads (or have mismatched MIME).
-                        # Retry as documents so forwarding still succeeds.
-                        if "Failure while processing image" in str(media_exc):
-                            print(f"[X][WARN] Media upload as image failed for @{username}; retrying as document.")
+                        try:
                             await self.bot_client.send_file(
                                 forward_to_channel,
                                 files,
                                 caption=caption,
                                 parse_mode=parse_mode,
-                                force_document=True,
                             )
-                        else:
-                            raise
+                        except Exception as media_exc:
+                            # Some Twitter assets are not valid Telegram "photo" payloads (or have mismatched MIME).
+                            # Retry as documents so forwarding still succeeds.
+                            if "Failure while processing image" in str(media_exc):
+                                print(f"[X][WARN] Media upload as image failed for @{username}; retrying as document.")
+                                await self.bot_client.send_file(
+                                    forward_to_channel,
+                                    files,
+                                    caption=caption,
+                                    parse_mode=parse_mode,
+                                    force_document=True,
+                                )
+                            else:
+                                raise
 
-                if remaining_html:
-                    for chunk in self._split_text(remaining_html):
+                    if remaining_html:
+                        for chunk in self._split_text(remaining_html):
+                            await self.bot_client.send_message(forward_to_channel, chunk, parse_mode="html")
+                elif full_html:
+                    for chunk in self._split_text(full_html):
                         await self.bot_client.send_message(forward_to_channel, chunk, parse_mode="html")
-            elif full_html:
-                for chunk in self._split_text(full_html):
-                    await self.bot_client.send_message(forward_to_channel, chunk, parse_mode="html")
 
-            print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
+                print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
+            else:
+                print(
+                    f"[X][SKIP] @{username} score={hype_score}/10 below main threshold "
+                    f"{self.min_hype_score}/10"
+                )
 
             # Optional second channel: clean publish (media + main text/hashtags only).
             if (
-                self.clean_forward_channel
+                send_clean
+                and self.clean_forward_channel
                 and self.clean_forward_channel != forward_to_channel
             ):
                 await self._forward_clean_copy(
@@ -581,6 +592,11 @@ class TwitterCollector:
                     target_channel=self.clean_forward_channel,
                     text=(clean_text or "").strip(),
                     media_paths=temp_media_paths,
+                )
+            elif self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
+                print(
+                    f"[X][SKIP-CLEAN] @{username} score={hype_score}/10 below clean threshold "
+                    f"{self.clean_min_hype_score}/10"
                 )
         except Exception as exc:
             print(f"[X][ERROR] Forwarding tweet failed @{username}: {exc}")
