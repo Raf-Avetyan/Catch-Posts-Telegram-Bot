@@ -161,6 +161,7 @@ class TwitterCollector:
         self._twikit_disabled_until_ts = 0.0
         self._snscrape_unavailable_logged = False
         self._publish_jobs: Dict[str, Dict[str, Any]] = {}
+        self.unpublished_ttl_seconds = 24 * 60 * 60
 
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
@@ -503,12 +504,9 @@ class TwitterCollector:
                 for batch_index, batch in enumerate(self._chunks(media_paths, 10)):
                     caption = None
                     pm = None
-                    # Album messages usually don't keep inline buttons reliably.
-                    # If we need buttons and this is an album batch, keep caption for a follow-up text message.
-                    defer_caption_to_text = bool(buttons) and len(batch) > 1 and batch_index == 0 and not button_attached
                     can_attach_button_here = bool(buttons) and len(batch) == 1 and not button_attached
 
-                    if not caption_sent and remaining and not defer_caption_to_text:
+                    if not caption_sent and remaining:
                         if len(remaining) <= 1024:
                             caption = remaining
                             remaining = ""
@@ -643,7 +641,17 @@ class TwitterCollector:
                 parse_mode=parse_mode,
                 buttons=buttons,
             )
+            if buttons is not None:
+                button_attached = True
             first_message_id = msg.id
+
+        # If button was not attached during send flow (common for media albums), attach it by editing first message.
+        if buttons is not None and not button_attached and first_message_id is not None:
+            try:
+                await self.bot_client.edit_message(target_channel, first_message_id, buttons=buttons)
+                button_attached = True
+            except Exception:
+                pass
         return first_message_id
 
     def _download_media_urls_to_temp(self, media_urls: List[str]) -> List[str]:
@@ -791,18 +799,26 @@ class TwitterCollector:
                 text=full_html,
                 media_paths=temp_media_paths,
                 parse_mode="html",
-                buttons=publish_buttons,
+                buttons=None,
             )
             print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
 
             if publish_token and main_message_id:
+                button_msg = await self.bot_client.send_message(
+                    forward_to_channel,
+                    "\u2063",
+                    buttons=publish_buttons,
+                    reply_to=main_message_id,
+                )
                 self._publish_jobs[publish_token] = {
                     "channel": forward_to_channel,
                     "message_id": main_message_id,
+                    "button_message_id": int(getattr(button_msg, "id", 0) or 0),
                     "username": username,
                     "hype_score": hype_score,
                     "clean_channel": self.clean_forward_channel,
                     "published": False,
+                    "created_ts": time.time(),
                 }
                 print(f"[X][INFO] Publish button attached for @{username} (token={publish_token}).")
         except Exception as exc:
@@ -966,6 +982,38 @@ class TwitterCollector:
                         os.remove(p)
                 except OSError:
                     pass
+
+    async def _cleanup_expired_unpublished_posts(self) -> None:
+        if not self.bot_client or not self._publish_jobs:
+            return
+        now = time.time()
+        expired_tokens: List[str] = []
+        for token, job in list(self._publish_jobs.items()):
+            if job.get("published"):
+                continue
+            created_ts = float(job.get("created_ts") or 0.0)
+            if not created_ts or (now - created_ts) < self.unpublished_ttl_seconds:
+                continue
+
+            channel = str(job.get("channel") or forward_to_channel)
+            msg_ids: List[int] = []
+            main_id = int(job.get("message_id") or 0)
+            btn_id = int(job.get("button_message_id") or 0)
+            if main_id > 0:
+                msg_ids.append(main_id)
+            if btn_id > 0 and btn_id != main_id:
+                msg_ids.append(btn_id)
+
+            try:
+                if msg_ids:
+                    await self.bot_client.delete_messages(channel, msg_ids)
+                expired_tokens.append(token)
+                print(f"[X][CLEANUP] Deleted unpublished post token={token} after 24h.")
+            except Exception as exc:
+                print(f"[X][WARN] Failed to delete expired unpublished post token={token}: {exc}")
+
+        for token in expired_tokens:
+            self._publish_jobs.pop(token, None)
 
     async def _fetch_user_tweets(self, username: str) -> List[Any]:
         if self.twikit_only:
@@ -1257,8 +1305,10 @@ class TwitterCollector:
         )
 
         while True:
+            await self._cleanup_expired_unpublished_posts()
             for username in self.usernames:
                 await self._collect_user_tweets(username)
+            await self._cleanup_expired_unpublished_posts()
             await asyncio.sleep(self.poll_seconds)
 
 
