@@ -492,6 +492,7 @@ class TwitterCollector:
             return lp.endswith(".mp4") or lp.endswith(".webm") or lp.endswith(".mov") or lp.endswith(".mkv")
 
         first_message_id: Optional[int] = None
+        button_attached = False
         if media_paths:
             remaining = text or ""
             caption_sent = False
@@ -499,10 +500,15 @@ class TwitterCollector:
 
             # Image-only posts: send as albums so all images stay in one post.
             if not contains_video:
-                for batch in self._chunks(media_paths, 10):
+                for batch_index, batch in enumerate(self._chunks(media_paths, 10)):
                     caption = None
                     pm = None
-                    if not caption_sent and remaining:
+                    # Album messages usually don't keep inline buttons reliably.
+                    # If we need buttons and this is an album batch, keep caption for a follow-up text message.
+                    defer_caption_to_text = bool(buttons) and len(batch) > 1 and batch_index == 0 and not button_attached
+                    can_attach_button_here = bool(buttons) and len(batch) == 1 and not button_attached
+
+                    if not caption_sent and remaining and not defer_caption_to_text:
                         if len(remaining) <= 1024:
                             caption = remaining
                             remaining = ""
@@ -522,7 +528,10 @@ class TwitterCollector:
                             batch,
                             caption=caption,
                             parse_mode=pm,
+                            buttons=buttons if can_attach_button_here else None,
                         )
+                        if can_attach_button_here:
+                            button_attached = True
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
                             # Retry one-by-one so only bad images fall back to document.
@@ -536,6 +545,7 @@ class TwitterCollector:
                                         single_path,
                                         caption=single_caption,
                                         parse_mode=single_pm,
+                                        buttons=buttons if (can_attach_button_here and idx == 0) else None,
                                     )
                                 except Exception as single_exc:
                                     if "Failure while processing image" in str(single_exc):
@@ -545,9 +555,12 @@ class TwitterCollector:
                                             caption=single_caption,
                                             parse_mode=single_pm,
                                             force_document=True,
+                                            buttons=buttons if (can_attach_button_here and idx == 0) else None,
                                         )
                                     else:
                                         raise
+                                if can_attach_button_here and idx == 0:
+                                    button_attached = True
                                 if sent is None:
                                     sent = item_sent
                         else:
@@ -563,6 +576,7 @@ class TwitterCollector:
                 for path in media_paths:
                     caption = None
                     pm = None
+                    can_attach_button_here = bool(buttons) and not button_attached and first_message_id is None
                     if not caption_sent and remaining:
                         if len(remaining) <= 1024:
                             caption = remaining
@@ -583,8 +597,11 @@ class TwitterCollector:
                             path,
                             caption=caption,
                             parse_mode=pm,
+                            buttons=buttons if can_attach_button_here else None,
                             supports_streaming=_is_video_file(path),
                         )
+                        if can_attach_button_here:
+                            button_attached = True
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
                             sent = await self.bot_client.send_file(
@@ -593,7 +610,10 @@ class TwitterCollector:
                                 caption=caption,
                                 parse_mode=pm,
                                 force_document=True,
+                                buttons=buttons if can_attach_button_here else None,
                             )
+                            if can_attach_button_here:
+                                button_attached = True
                         else:
                             raise
 
@@ -604,14 +624,18 @@ class TwitterCollector:
                             first_message_id = sent.id
 
             if remaining:
-                msg = await self.bot_client.send_message(
-                    target_channel,
-                    remaining,
-                    parse_mode=parse_mode,
-                    buttons=buttons if first_message_id is None else None,
-                )
-                if first_message_id is None:
-                    first_message_id = msg.id
+                chunks = self._split_text(remaining)
+                for i, chunk in enumerate(chunks):
+                    msg = await self.bot_client.send_message(
+                        target_channel,
+                        chunk,
+                        parse_mode=parse_mode,
+                        buttons=buttons if (not button_attached and i == 0) else None,
+                    )
+                    if not button_attached and i == 0 and buttons is not None:
+                        button_attached = True
+                    if first_message_id is None:
+                        first_message_id = msg.id
         elif text:
             msg = await self.bot_client.send_message(
                 target_channel,
