@@ -413,6 +413,20 @@ class TwitterCollector:
                 uniq = filtered
         return uniq
 
+    @staticmethod
+    def _has_video_media_urls(media_urls: List[str]) -> bool:
+        for url in media_urls:
+            lu = (url or "").lower()
+            if (
+                "video.twimg.com" in lu
+                or ".mp4" in lu
+                or ".webm" in lu
+                or ".mov" in lu
+                or ".mkv" in lu
+            ):
+                return True
+        return False
+
     async def _start_forward_bot(self) -> None:
         if not forwarding_enabled or not forward_to_channel or not bot_token:
             print("[X][WARN] Twitter -> Telegram forwarding disabled by config.")
@@ -487,7 +501,6 @@ class TwitterCollector:
             if not contains_video:
                 for batch in self._chunks(media_paths, 10):
                     caption = None
-                    btns = None
                     pm = None
                     if not caption_sent and remaining:
                         if len(remaining) <= 1024:
@@ -502,8 +515,6 @@ class TwitterCollector:
                         caption_sent = True
                         if caption and parse_mode:
                             pm = parse_mode
-                    if first_message_id is None and buttons is not None:
-                        btns = buttons
 
                     try:
                         sent = await self.bot_client.send_file(
@@ -511,18 +522,34 @@ class TwitterCollector:
                             batch,
                             caption=caption,
                             parse_mode=pm,
-                            buttons=btns,
                         )
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
-                            sent = await self.bot_client.send_file(
-                                target_channel,
-                                batch,
-                                caption=caption,
-                                parse_mode=pm,
-                                buttons=btns,
-                                force_document=True,
-                            )
+                            # Retry one-by-one so only bad images fall back to document.
+                            sent = None
+                            for idx, single_path in enumerate(batch):
+                                single_caption = caption if idx == 0 else None
+                                single_pm = pm if idx == 0 else None
+                                try:
+                                    item_sent = await self.bot_client.send_file(
+                                        target_channel,
+                                        single_path,
+                                        caption=single_caption,
+                                        parse_mode=single_pm,
+                                    )
+                                except Exception as single_exc:
+                                    if "Failure while processing image" in str(single_exc):
+                                        item_sent = await self.bot_client.send_file(
+                                            target_channel,
+                                            single_path,
+                                            caption=single_caption,
+                                            parse_mode=single_pm,
+                                            force_document=True,
+                                        )
+                                    else:
+                                        raise
+                                if sent is None:
+                                    sent = item_sent
                         else:
                             raise
 
@@ -535,7 +562,6 @@ class TwitterCollector:
                 # Mixed/video posts: send per-file to preserve video behavior.
                 for path in media_paths:
                     caption = None
-                    btns = None
                     pm = None
                     if not caption_sent and remaining:
                         if len(remaining) <= 1024:
@@ -550,8 +576,6 @@ class TwitterCollector:
                         caption_sent = True
                         if caption and parse_mode:
                             pm = parse_mode
-                    if first_message_id is None and buttons is not None:
-                        btns = buttons
 
                     try:
                         sent = await self.bot_client.send_file(
@@ -559,7 +583,6 @@ class TwitterCollector:
                             path,
                             caption=caption,
                             parse_mode=pm,
-                            buttons=btns,
                             supports_streaming=_is_video_file(path),
                         )
                     except Exception as media_exc:
@@ -569,7 +592,6 @@ class TwitterCollector:
                                 path,
                                 caption=caption,
                                 parse_mode=pm,
-                                buttons=btns,
                                 force_document=True,
                             )
                         else:
@@ -689,6 +711,9 @@ class TwitterCollector:
     ) -> None:
         if not self.bot_client or not forward_to_channel:
             return
+        if self._has_video_media_urls(media_urls):
+            print(f"[X][SKIP] @{username} contains video media; not forwarding to main channel.")
+            return
 
         clean_text = self.rewriter.clean_footer_text(text)
         if clean_text and self.rewriter.enabled:
@@ -742,11 +767,17 @@ class TwitterCollector:
                 text=full_html,
                 media_paths=temp_media_paths,
                 parse_mode="html",
-                buttons=publish_buttons,
+                buttons=None,
             )
             print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
 
             if publish_token and main_message_id:
+                await self.bot_client.send_message(
+                    forward_to_channel,
+                    "PUBLISH",
+                    buttons=publish_buttons,
+                    reply_to=main_message_id,
+                )
                 self._publish_jobs[publish_token] = {
                     "channel": forward_to_channel,
                     "message_id": main_message_id,
