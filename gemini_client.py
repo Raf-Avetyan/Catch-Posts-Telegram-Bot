@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 import tempfile
@@ -37,7 +37,7 @@ class GeminiRewriter:
                     cleaned.append("")
                 continue
 
-            normalized = line.replace("•", "|").replace("·", "|")
+            normalized = line.replace("вЂў", "|").replace("В·", "|")
             parts = [p.strip() for p in normalized.split("|") if p.strip()]
             if len(parts) >= 2 and all(footer_token_pattern.match(part) for part in parts):
                 continue
@@ -242,6 +242,39 @@ class GeminiRewriter:
         )
         return self._extract_hashtags(raw or "")[:count]
 
+    @staticmethod
+    def _keyword_fallback_hashtags(source_text: str, count: int = 3) -> List[str]:
+        value = (source_text or "").strip()
+        if not value:
+            return []
+        # Remove links/hashtags and keep alnum words.
+        value = re.sub(r"https?://\S+", " ", value)
+        value = re.sub(r"#\w+", " ", value)
+        words = re.findall(r"[A-Za-z][A-Za-z0-9]{2,24}", value)
+        stop = {
+            "the", "and", "for", "with", "that", "this", "from", "into", "about", "have",
+            "has", "was", "were", "are", "will", "just", "now", "over", "under", "their",
+            "your", "you", "its", "after", "before", "than", "then", "they", "them",
+            "what", "when", "where", "which", "while", "also", "more", "most", "very",
+            "news", "latest", "breaking", "update", "important", "crypto", "market",
+        }
+        freq: Dict[str, int] = {}
+        for w in words:
+            lw = w.lower()
+            if lw in stop:
+                continue
+            freq[lw] = freq.get(lw, 0) + 1
+
+        ranked = sorted(freq.items(), key=lambda x: (-x[1], -len(x[0]), x[0]))
+        tags: List[str] = []
+        for word, _ in ranked:
+            tag = f"#{word[:1].upper()}{word[1:]}"
+            if tag.lower() not in {t.lower() for t in tags}:
+                tags.append(tag)
+            if len(tags) >= count:
+                break
+        return tags[:count]
+
     def _strip_existing_hashtags(self, text: str) -> str:
         lines = (text or "").splitlines()
         kept: List[str] = []
@@ -267,7 +300,15 @@ class GeminiRewriter:
                     seen.add(tag.lower())
 
         if len(tags) < 3:
-            for tag in ["#CryptoNews", "#MarketUpdate", "#Blockchain"]:
+            for tag in self._keyword_fallback_hashtags(source_text, count=5):
+                if tag.lower() not in seen:
+                    tags.append(tag)
+                    seen.add(tag.lower())
+                if len(tags) >= 3:
+                    break
+
+        if len(tags) < 3:
+            for tag in ["#GlobalMarkets", "#DigitalAssets", "#MacroTrends"]:
                 if tag.lower() not in seen:
                     tags.append(tag)
                     seen.add(tag.lower())
@@ -361,15 +402,15 @@ class GeminiRewriter:
     @staticmethod
     def _emoji_for_lead(word: str) -> str:
         mapping = {
-            "BREAKING": "🚨",
-            "LATEST": "📰",
-            "HOT": "🔥",
-            "BIG": "⚡",
-            "IMPORTANT": "🚨",
-            "ALERT": "🚨",
-            "UPDATE": "📰",
+            "BREAKING": "рџљЁ",
+            "LATEST": "",
+            "HOT": "рџ”Ґ",
+            "BIG": "вљЎ",
+            "IMPORTANT": "рџљЁ",
+            "ALERT": "рџљЁ",
+            "UPDATE": "",
         }
-        return mapping.get(word, "📰")
+        return mapping.get(word, "")
 
     def _ensure_lead_banner_block(self, text: str, source_text: str = "") -> str:
         value = (text or "").strip()
@@ -400,7 +441,8 @@ class GeminiRewriter:
             if rest:
                 body_parts.append(rest)
             body = "\n".join(body_parts).strip()
-            return f"{emoji} {label}:\n\n{body}".strip()
+            lead = f"{emoji} {label}:".strip() if emoji else f"{label}:"
+            return f"{lead}\n\n{body}".strip()
 
         # If rewritten first line has a known lead without separator, remove it from body and normalize style.
         inferred_emoji, inferred_label = self._extract_lead_from_text(value)
@@ -416,7 +458,8 @@ class GeminiRewriter:
             ).strip()
             if not body_value:
                 body_value = value
-        return f"{emoji} {label}:\n\n{body_value}".strip()
+        lead = f"{emoji} {label}:".strip() if emoji else f"{label}:"
+        return f"{lead}\n\n{body_value}".strip()
 
     def _extract_image_urls(self, text: str) -> List[str]:
         urls = re.findall(r"https?://[^\s\"'<>]+", text or "")
@@ -721,3 +764,4 @@ class GeminiRewriter:
                 break
 
         return collected_paths[:count]
+

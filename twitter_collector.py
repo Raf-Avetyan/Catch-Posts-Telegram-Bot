@@ -287,6 +287,16 @@ class TwitterCollector:
     @staticmethod
     def _extract_media_urls(tweet: Any) -> List[str]:
         media_urls: List[str] = []
+        video_urls: List[str] = []
+
+        def _is_video_like(url: str) -> bool:
+            u = (url or "").lower()
+            return (
+                "video.twimg.com" in u
+                or ".mp4" in u
+                or ".webm" in u
+                or "/video/" in u
+            )
 
         def _add_url(value: Any) -> None:
             if not isinstance(value, str):
@@ -295,6 +305,8 @@ class TwitterCollector:
             if not url.startswith("http"):
                 return
             media_urls.append(url)
+            if _is_video_like(url):
+                video_urls.append(url)
 
         def _extract_from_item(item: Any) -> None:
             if item is None:
@@ -383,6 +395,22 @@ class TwitterCollector:
                 continue
             seen.add(url)
             uniq.append(url)
+
+        # If video exists, prefer real video URLs over video thumbnail images.
+        if video_urls:
+            filtered: List[str] = []
+            for url in uniq:
+                lu = url.lower()
+                is_video_thumb = (
+                    "ext_tw_video_thumb" in lu
+                    or "video_thumb" in lu
+                    or ("pbs.twimg.com" in lu and re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", lu))
+                )
+                if is_video_thumb:
+                    continue
+                filtered.append(url)
+            if filtered:
+                uniq = filtered
         return uniq
 
     async def _start_forward_bot(self) -> None:
@@ -445,12 +473,15 @@ class TwitterCollector:
         if not self.bot_client:
             return None
 
+        def _is_video_file(path: str) -> bool:
+            lp = (path or "").lower()
+            return lp.endswith(".mp4") or lp.endswith(".webm") or lp.endswith(".mov") or lp.endswith(".mkv")
+
         first_message_id: Optional[int] = None
         if media_paths:
             remaining = text or ""
             caption_sent = False
-            for batch in self._chunks(media_paths, 10):
-                files = batch if len(batch) > 1 else batch[0]
+            for path in media_paths:
                 caption = None
                 btns = None
                 pm = None
@@ -473,16 +504,17 @@ class TwitterCollector:
                 try:
                     sent = await self.bot_client.send_file(
                         target_channel,
-                        files,
+                        path,
                         caption=caption,
                         parse_mode=pm,
                         buttons=btns,
+                        supports_streaming=_is_video_file(path),
                     )
                 except Exception as media_exc:
                     if "Failure while processing image" in str(media_exc):
                         sent = await self.bot_client.send_file(
                             target_channel,
-                            files,
+                            path,
                             caption=caption,
                             parse_mode=pm,
                             buttons=btns,
@@ -539,6 +571,20 @@ class TwitterCollector:
                 suffix = ".gif"
             elif "mp4" in content_type:
                 suffix = ".mp4"
+            else:
+                lower_url = media_url.lower()
+                if ".mp4" in lower_url:
+                    suffix = ".mp4"
+                elif ".webm" in lower_url:
+                    suffix = ".webm"
+                elif ".mov" in lower_url:
+                    suffix = ".mov"
+                elif ".png" in lower_url:
+                    suffix = ".png"
+                elif ".webp" in lower_url:
+                    suffix = ".webp"
+                elif ".gif" in lower_url:
+                    suffix = ".gif"
 
             fd, tmp_path = tempfile.mkstemp(prefix="tweet_media_", suffix=suffix)
             with os.fdopen(fd, "wb") as f:
@@ -676,24 +722,31 @@ class TwitterCollector:
     ) -> None:
         if not self.bot_client or not target_channel:
             return
+        def _is_video_file(path: str) -> bool:
+            lp = (path or "").lower()
+            return lp.endswith(".mp4") or lp.endswith(".webm") or lp.endswith(".mov") or lp.endswith(".mkv")
         try:
             if media_paths:
                 remaining = text
                 caption_sent = False
-                for batch in self._chunks(media_paths, 10):
-                    files = batch if len(batch) > 1 else batch[0]
+                for path in media_paths:
                     caption = None
                     if not caption_sent and remaining:
                         caption = remaining[:1024]
                         remaining = remaining[1024:].lstrip()
                         caption_sent = True
                     try:
-                        await self.bot_client.send_file(target_channel, files, caption=caption)
+                        await self.bot_client.send_file(
+                            target_channel,
+                            path,
+                            caption=caption,
+                            supports_streaming=_is_video_file(path),
+                        )
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
                             await self.bot_client.send_file(
                                 target_channel,
-                                files,
+                                path,
                                 caption=caption,
                                 force_document=True,
                             )
