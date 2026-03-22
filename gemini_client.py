@@ -444,16 +444,54 @@ class GeminiRewriter:
 
     @staticmethod
     def _emoji_for_lead(word: str) -> str:
-        mapping = {
-            "BREAKING": "\U0001F6A8",
-            "LATEST": "",
-            "HOT": "\U0001F525",
-            "BIG": "\u26A1",
-            "IMPORTANT": "\U0001F6A8",
-            "ALERT": "\U0001F6A8",
-            "UPDATE": "",
+        w = (word or "").upper().strip()
+        if w in {"HOT"}:
+            return "\U0001F525"  # 🔥
+        if w in {"LATEST", "BREAKING", "IMPORTANT", "ALERT", "UPDATE"}:
+            return "\U0001F6A8"  # 🚨
+        if w in {"BIG"}:
+            return "\U0001F4A5"  # 💥
+        # Other news
+        return "\U0001FA78"  # 🩸
+
+    @staticmethod
+    def _extract_country_flags(text: str) -> str:
+        value = (text or "").lower()
+        # Lightweight country->flag mapping for most common news countries.
+        country_flags = {
+            "united states": "\U0001F1FA\U0001F1F8",
+            "usa": "\U0001F1FA\U0001F1F8",
+            "us ": "\U0001F1FA\U0001F1F8",
+            "u.s.": "\U0001F1FA\U0001F1F8",
+            "uk": "\U0001F1EC\U0001F1E7",
+            "united kingdom": "\U0001F1EC\U0001F1E7",
+            "britain": "\U0001F1EC\U0001F1E7",
+            "england": "\U0001F1EC\U0001F1E7",
+            "eu": "\U0001F1EA\U0001F1FA",
+            "european union": "\U0001F1EA\U0001F1FA",
+            "china": "\U0001F1E8\U0001F1F3",
+            "japan": "\U0001F1EF\U0001F1F5",
+            "russia": "\U0001F1F7\U0001F1FA",
+            "ukraine": "\U0001F1FA\U0001F1E6",
+            "iran": "\U0001F1EE\U0001F1F7",
+            "israel": "\U0001F1EE\U0001F1F1",
+            "turkey": "\U0001F1F9\U0001F1F7",
+            "india": "\U0001F1EE\U0001F1F3",
+            "france": "\U0001F1EB\U0001F1F7",
+            "germany": "\U0001F1E9\U0001F1EA",
+            "italy": "\U0001F1EE\U0001F1F9",
+            "spain": "\U0001F1EA\U0001F1F8",
+            "brazil": "\U0001F1E7\U0001F1F7",
+            "canada": "\U0001F1E8\U0001F1E6",
+            "armenia": "\U0001F1E6\U0001F1F2",
         }
-        return mapping.get(word, "")
+        flags: List[str] = []
+        for key, flag in country_flags.items():
+            if key in value and flag not in flags:
+                flags.append(flag)
+            if len(flags) >= 3:
+                break
+        return " ".join(flags).strip()
 
     def _ensure_lead_banner_block(self, text: str, source_text: str = "") -> str:
         value = (text or "").strip()
@@ -461,6 +499,9 @@ class GeminiRewriter:
             return value
 
         src_emoji, src_label = self._extract_lead_from_text(source_text)
+        src_flags = self._extract_country_flags(source_text)
+        txt_flags = self._extract_country_flags(value)
+        lead_flags = src_flags or txt_flags
         lines = value.splitlines()
         first = lines[0].strip() if lines else ""
         rest = "\n".join(lines[1:]).strip()
@@ -484,7 +525,9 @@ class GeminiRewriter:
             if rest:
                 body_parts.append(rest)
             body = "\n".join(body_parts).strip()
-            lead = f"{emoji} {label}:".strip() if emoji else f"{label}:"
+            lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
+            lead_prefix = " ".join(lead_prefix_parts).strip()
+            lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
             return f"{lead}\n\n{body}".strip()
 
         # If rewritten first line has a known lead without separator, remove it from body and normalize style.
@@ -501,7 +544,9 @@ class GeminiRewriter:
             ).strip()
             if not body_value:
                 body_value = value
-        lead = f"{emoji} {label}:".strip() if emoji else f"{label}:"
+        lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
+        lead_prefix = " ".join(lead_prefix_parts).strip()
+        lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
         return f"{lead}\n\n{body_value}".strip()
 
     def _extract_image_urls(self, text: str) -> List[str]:
