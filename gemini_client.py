@@ -146,6 +146,24 @@ class GeminiRewriter:
             result = self._fallback_paraphrase(result)
             similarity = SequenceMatcher(a=original, b=result).ratio()
 
+        # If still almost same (or identical), force one more rewrite pass.
+        if similarity > 0.90 or result.strip().lower() == original.strip().lower():
+            forced = self._generate_text(
+                "Rewrite this post so wording is clearly different from source while keeping facts identical. "
+                "You must change sentence openings and connectors. Keep links/numbers/entities unchanged. "
+                "Return only rewritten text.\n\n"
+                f"Source:\n{original}",
+                temperature=0.95,
+            )
+            if forced:
+                result = self.clean_footer_text(forced.strip()) or result
+            similarity = SequenceMatcher(a=original, b=result).ratio()
+
+        # Final hard fallback: deterministic surface change from original text.
+        if similarity > 0.92 or result.strip().lower() == original.strip().lower():
+            result = self._force_surface_change(original)
+            similarity = SequenceMatcher(a=original, b=result).ratio()
+
         # Too far => potential meaning drift, fallback to safer rewrite.
         if similarity < 0.45:
             safer = self._generate_text(
@@ -199,6 +217,31 @@ class GeminiRewriter:
         for src, dst in replacements.items():
             out = re.sub(rf"\b{re.escape(src)}\b", dst, out, flags=re.IGNORECASE)
         return GeminiRewriter._normalize_lead_label(out)
+
+    @staticmethod
+    def _force_surface_change(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        lines = [x.strip() for x in value.splitlines() if x.strip()]
+        if not lines:
+            return value
+
+        # Keep first line if it looks like lead label; rotate the rest for visible change.
+        lead_line = lines[0] if re.search(r"^[^\w\s]{0,4}\s*[A-Za-z]{3,24}\s*[:\-]", lines[0]) else ""
+        body = lines[1:] if lead_line else lines
+        if len(body) >= 2:
+            body = body[1:] + body[:1]
+
+        joined = " ".join(body)
+        joined = re.sub(r"\bhowever\b", "still", joined, flags=re.IGNORECASE)
+        joined = re.sub(r"\btherefore\b", "so", joined, flags=re.IGNORECASE)
+        joined = re.sub(r"\bin addition\b", "also", joined, flags=re.IGNORECASE)
+        joined = re.sub(r"\baccording to\b", "per", joined, flags=re.IGNORECASE)
+        joined = re.sub(r"\s{2,}", " ", joined).strip()
+        if lead_line:
+            return f"{lead_line}\n{joined}".strip()
+        return joined
 
     @staticmethod
     def _normalize_lead_label(text: str) -> str:
