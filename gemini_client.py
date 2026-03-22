@@ -508,6 +508,15 @@ class GeminiRewriter:
         return " ".join(flags).strip()
 
     def _ensure_lead_banner_block(self, text: str, source_text: str = "") -> str:
+        def _strip_leading_flags_emojis(value: str) -> str:
+            # Remove only prefix emojis/flags from body start (not whole body content).
+            return re.sub(
+                r"^(?:(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF])\s*)+",
+                "",
+                (value or "").strip(),
+                flags=re.UNICODE,
+            ).strip()
+
         value = (text or "").strip()
         if not value:
             return value
@@ -539,7 +548,7 @@ class GeminiRewriter:
                 body_parts.append(tail)
             if rest:
                 body_parts.append(rest)
-            body = "\n".join(body_parts).strip()
+            body = _strip_leading_flags_emojis("\n".join(body_parts).strip())
             lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
             lead_prefix = " ".join(lead_prefix_parts).strip()
             lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
@@ -560,6 +569,7 @@ class GeminiRewriter:
             ).strip()
             if not body_value:
                 body_value = value
+        body_value = _strip_leading_flags_emojis(body_value)
         lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
         lead_prefix = " ".join(lead_prefix_parts).strip()
         lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
