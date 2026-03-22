@@ -428,6 +428,51 @@ class TwitterCollector:
                 return True
         return False
 
+    @staticmethod
+    def _tweet_has_video(tweet: Any) -> bool:
+        def _item_has_video(item: Any) -> bool:
+            if item is None:
+                return False
+            if isinstance(item, str):
+                u = item.lower()
+                return ("video.twimg.com" in u) or (".mp4" in u) or (".webm" in u)
+            if isinstance(item, dict):
+                media_type = str(item.get("type") or item.get("mediaType") or "").lower()
+                if media_type in {"video", "animated_gif"}:
+                    return True
+                if item.get("video_info") or item.get("variants"):
+                    return True
+                for key in ("url", "media_url", "media_url_https", "previewUrl", "fullUrl"):
+                    if _item_has_video(item.get(key)):
+                        return True
+                return False
+
+            for attr in ("type", "mediaType"):
+                val = str(getattr(item, attr, "") or "").lower()
+                if val in {"video", "animated_gif"}:
+                    return True
+            if getattr(item, "video_info", None) or getattr(item, "variants", None):
+                return True
+            for attr in ("url", "media_url", "media_url_https", "previewUrl", "fullUrl"):
+                if _item_has_video(getattr(item, attr, None)):
+                    return True
+            return False
+
+        for attr in ("media", "videos", "video"):
+            value = getattr(tweet, attr, None)
+            if isinstance(value, list):
+                if any(_item_has_video(v) for v in value):
+                    return True
+            elif _item_has_video(value):
+                return True
+
+        raw = getattr(tweet, "_data", None) or getattr(tweet, "raw", None)
+        if isinstance(raw, dict):
+            media = raw.get("media") or ((raw.get("entities") or {}).get("media")) or ((raw.get("extended_entities") or {}).get("media"))
+            if isinstance(media, list) and any(_item_has_video(v) for v in media):
+                return True
+        return False
+
     async def _start_forward_bot(self) -> None:
         if not forwarding_enabled or not forward_to_channel or not bot_token:
             print("[X][WARN] Twitter -> Telegram forwarding disabled by config.")
@@ -740,10 +785,11 @@ class TwitterCollector:
         text: str,
         media_urls: List[str],
         created_at: str,
+        has_video_media: bool = False,
     ) -> None:
         if not self.bot_client or not forward_to_channel:
             return
-        if self._has_video_media_urls(media_urls):
+        if has_video_media or self._has_video_media_urls(media_urls):
             print(f"[X][SKIP] @{username} contains video media; not forwarding to main channel.")
             return
 
@@ -785,6 +831,9 @@ class TwitterCollector:
             full_html = f"{body_html}\n\n{meta_html}"
         else:
             full_html = body_html or meta_html
+        if media_urls and len(full_html) > 1024:
+            print(f"[X][SKIP] @{username} caption would exceed 1024 chars; not forwarding to main channel.")
+            return
 
         temp_media_paths = await asyncio.to_thread(self._download_media_urls_to_temp, media_urls)
         try:
@@ -1069,6 +1118,7 @@ class TwitterCollector:
             if created_at == _to_iso(None):
                 created_at = _to_iso(getattr(tweet, "created_at", None))
             media_urls = self._extract_media_urls(tweet)
+            has_video_media = self._tweet_has_video(tweet)
             media_path = "|".join(media_urls) if media_urls else None
 
             inserted = self.db.insert_post(
@@ -1090,6 +1140,7 @@ class TwitterCollector:
                     text=text,
                     media_urls=media_urls,
                     created_at=created_at,
+                    has_video_media=has_video_media,
                 )
 
         if not inserted_any:
