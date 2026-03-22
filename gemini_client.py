@@ -402,12 +402,12 @@ class GeminiRewriter:
     @staticmethod
     def _emoji_for_lead(word: str) -> str:
         mapping = {
-            "BREAKING": "рџљЁ",
+            "BREAKING": "\U0001F6A8",
             "LATEST": "",
-            "HOT": "рџ”Ґ",
-            "BIG": "вљЎ",
-            "IMPORTANT": "рџљЁ",
-            "ALERT": "рџљЁ",
+            "HOT": "\U0001F525",
+            "BIG": "\u26A1",
+            "IMPORTANT": "\U0001F6A8",
+            "ALERT": "\U0001F6A8",
             "UPDATE": "",
         }
         return mapping.get(word, "")
