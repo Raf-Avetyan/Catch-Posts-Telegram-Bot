@@ -444,15 +444,29 @@ class GeminiRewriter:
 
     @staticmethod
     def _emoji_for_lead(word: str) -> str:
-        w = (word or "").upper().strip()
-        if w in {"HOT"}:
-            return "\U0001F525"  # 🔥
-        if w in {"LATEST", "BREAKING", "IMPORTANT", "ALERT", "UPDATE"}:
-            return "\U0001F6A8"  # 🚨
-        if w in {"BIG"}:
-            return "\U0001F4A5"  # 💥
-        # Other news
-        return "\U0001FA78"  # 🩸
+        # Default now: no auto emoji for normal news.
+        return ""
+
+    @staticmethod
+    def _is_market_crash_news(text: str) -> bool:
+        value = (text or "").lower()
+        crash_signals = [
+            "market crash",
+            "crash",
+            "plunge",
+            "plunged",
+            "dump",
+            "selloff",
+            "sell-off",
+            "liquidation",
+            "wiped out",
+            "down 20%",
+            "down 30%",
+            "down 40%",
+            "bloodbath",
+            "red market",
+        ]
+        return any(s in value for s in crash_signals)
 
     @staticmethod
     def _extract_country_flags(text: str) -> str:
@@ -516,7 +530,8 @@ class GeminiRewriter:
             raw_label = (m.group("label") or "").upper().strip()
             label = src_label or raw_label
             prefix = (m.group("prefix") or "").strip()
-            emoji = src_emoji or prefix or self._emoji_for_lead(label)
+            auto_emoji = "\U0001FA78" if self._is_market_crash_news(source_text or value) else ""
+            emoji = src_emoji or prefix or auto_emoji or self._emoji_for_lead(label)
             tail = (m.group("tail") or "").strip()
 
             body_parts = []
@@ -533,7 +548,8 @@ class GeminiRewriter:
         # If rewritten first line has a known lead without separator, remove it from body and normalize style.
         inferred_emoji, inferred_label = self._extract_lead_from_text(value)
         label = src_label or inferred_label or self._choose_lead_word(value)
-        emoji = src_emoji or inferred_emoji or self._emoji_for_lead(label)
+        auto_emoji = "\U0001FA78" if self._is_market_crash_news(source_text or value) else ""
+        emoji = src_emoji or inferred_emoji or auto_emoji or self._emoji_for_lead(label)
         body_value = value
         if inferred_label:
             body_value = re.sub(

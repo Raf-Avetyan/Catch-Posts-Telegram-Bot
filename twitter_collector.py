@@ -167,6 +167,8 @@ class TwitterCollector:
         self._snscrape_unavailable_logged = False
         self._publish_jobs: Dict[str, Dict[str, Any]] = {}
         self.unpublished_ttl_seconds = 24 * 60 * 60
+        self.main_post_ttl_seconds = 60 * 60
+        self._main_post_cleanup_jobs: Dict[str, Dict[str, Any]] = {}
 
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
@@ -561,6 +563,7 @@ class TwitterCollector:
             # Image-only posts: send as albums so all images stay in one post.
             if not contains_video:
                 for batch_index, batch in enumerate(self._chunks(media_paths, 10)):
+                    prepared_batch, temp_fixed_paths = self._prepare_image_batch_for_album(batch)
                     caption = None
                     pm = None
                     can_attach_button_here = bool(buttons) and len(batch) == 1 and not button_attached
@@ -582,7 +585,7 @@ class TwitterCollector:
                     try:
                         sent = await self.bot_client.send_file(
                             target_channel,
-                            batch,
+                            prepared_batch,
                             caption=caption,
                             parse_mode=pm,
                             buttons=buttons if can_attach_button_here else None,
@@ -591,47 +594,16 @@ class TwitterCollector:
                             button_attached = True
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
-                            # Retry one-by-one so only bad images fall back to document.
+                            print("[X][WARN] Image album failed; dropping this batch to avoid split/file fallback.")
                             sent = None
-                            for idx, single_path in enumerate(batch):
-                                single_caption = caption if idx == 0 else None
-                                single_pm = pm if idx == 0 else None
-                                try:
-                                    item_sent = await self.bot_client.send_file(
-                                        target_channel,
-                                        single_path,
-                                        caption=single_caption,
-                                        parse_mode=single_pm,
-                                        buttons=buttons if (can_attach_button_here and idx == 0) else None,
-                                    )
-                                except Exception as single_exc:
-                                    if "Failure while processing image" in str(single_exc):
-                                        fixed = self._convert_image_to_jpeg_temp(single_path)
-                                        if fixed:
-                                            try:
-                                                item_sent = await self.bot_client.send_file(
-                                                    target_channel,
-                                                    fixed,
-                                                    caption=single_caption,
-                                                    parse_mode=single_pm,
-                                                    buttons=buttons if (can_attach_button_here and idx == 0) else None,
-                                                )
-                                            finally:
-                                                try:
-                                                    os.remove(fixed)
-                                                except OSError:
-                                                    pass
-                                        else:
-                                            print("[X][WARN] Dropping unsupported image instead of sending as file.")
-                                            continue
-                                    else:
-                                        raise
-                                if can_attach_button_here and idx == 0:
-                                    button_attached = True
-                                if sent is None:
-                                    sent = item_sent
                         else:
                             raise
+                    finally:
+                        for p in temp_fixed_paths:
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
 
                     if first_message_id is None:
                         if isinstance(sent, list) and sent:
@@ -792,6 +764,24 @@ class TwitterCollector:
         except Exception:
             return None
 
+    def _prepare_image_batch_for_album(self, paths: List[str]) -> tuple[List[str], List[str]]:
+        prepared: List[str] = []
+        temp_created: List[str] = []
+        for p in paths:
+            lp = (p or "").lower()
+            # Keep already safe formats.
+            if lp.endswith(".jpg") or lp.endswith(".jpeg") or lp.endswith(".png"):
+                prepared.append(p)
+                continue
+            fixed = self._convert_image_to_jpeg_temp(p)
+            if fixed:
+                prepared.append(fixed)
+                temp_created.append(fixed)
+            else:
+                # Keep original if conversion unavailable; Telegram may still accept.
+                prepared.append(p)
+        return prepared, temp_created
+
     @staticmethod
     def _format_tweet_footer(username: str, created_at: str) -> str:
         value = (created_at or "").strip()
@@ -941,6 +931,20 @@ class TwitterCollector:
                     "created_ts": time.time(),
                 }
                 print(f"[X][INFO] Publish button attached for @{username} (token={publish_token}).")
+                self._main_post_cleanup_jobs[publish_token] = {
+                    "channel": forward_to_channel,
+                    "message_id": main_message_id,
+                    "button_message_id": int(getattr(button_msg, "id", 0) or 0),
+                    "created_ts": time.time(),
+                }
+            elif main_message_id:
+                cleanup_id = uuid.uuid4().hex[:16]
+                self._main_post_cleanup_jobs[cleanup_id] = {
+                    "channel": forward_to_channel,
+                    "message_id": main_message_id,
+                    "button_message_id": 0,
+                    "created_ts": time.time(),
+                }
         except Exception as exc:
             print(f"[X][ERROR] Forwarding tweet failed @{username}: {exc}")
         finally:
@@ -970,36 +974,25 @@ class TwitterCollector:
 
                 if not contains_video:
                     for batch in self._chunks(media_paths, 10):
+                        prepared_batch, temp_fixed_paths = self._prepare_image_batch_for_album(batch)
                         caption = None
                         if not caption_sent and remaining:
                             caption = remaining[:1024]
                             remaining = remaining[1024:].lstrip()
                             caption_sent = True
                         try:
-                            await self.bot_client.send_file(target_channel, batch, caption=caption)
+                            await self.bot_client.send_file(target_channel, prepared_batch, caption=caption)
                         except Exception as media_exc:
                             if "Failure while processing image" in str(media_exc):
-                                for idx, single_path in enumerate(batch):
-                                    single_caption = caption if idx == 0 else None
-                                    try:
-                                        await self.bot_client.send_file(target_channel, single_path, caption=single_caption)
-                                    except Exception as single_exc:
-                                        if "Failure while processing image" in str(single_exc):
-                                            fixed = self._convert_image_to_jpeg_temp(single_path)
-                                            if fixed:
-                                                try:
-                                                    await self.bot_client.send_file(target_channel, fixed, caption=single_caption)
-                                                finally:
-                                                    try:
-                                                        os.remove(fixed)
-                                                    except OSError:
-                                                        pass
-                                            else:
-                                                print("[X][WARN] Dropping unsupported clean-channel image.")
-                                        else:
-                                            raise
+                                print("[X][WARN] Clean-channel image album failed; dropping this batch.")
                             else:
                                 raise
+                        finally:
+                            for p in temp_fixed_paths:
+                                try:
+                                    os.remove(p)
+                                except OSError:
+                                    pass
                 else:
                     for path in media_paths:
                         caption = None
@@ -1156,6 +1149,38 @@ class TwitterCollector:
 
         for token in expired_tokens:
             self._publish_jobs.pop(token, None)
+
+    async def _cleanup_expired_main_posts(self) -> None:
+        if not self.bot_client or not self._main_post_cleanup_jobs:
+            return
+        now = time.time()
+        expired_keys: List[str] = []
+        for key, job in list(self._main_post_cleanup_jobs.items()):
+            created_ts = float(job.get("created_ts") or 0.0)
+            if not created_ts or (now - created_ts) < self.main_post_ttl_seconds:
+                continue
+
+            channel = str(job.get("channel") or forward_to_channel)
+            msg_ids: List[int] = []
+            main_id = int(job.get("message_id") or 0)
+            btn_id = int(job.get("button_message_id") or 0)
+            if main_id > 0:
+                msg_ids.append(main_id)
+            if btn_id > 0 and btn_id != main_id:
+                msg_ids.append(btn_id)
+
+            try:
+                if msg_ids:
+                    await self.bot_client.delete_messages(channel, msg_ids)
+                print(f"[X][CLEANUP] Deleted main forwarded post key={key} after 1h.")
+            except Exception as exc:
+                print(f"[X][WARN] Failed to delete 1h-expired main post key={key}: {exc}")
+            finally:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self._main_post_cleanup_jobs.pop(key, None)
+            self._publish_jobs.pop(key, None)
 
     async def _fetch_user_tweets(self, username: str) -> List[Any]:
         if self.twikit_only:
@@ -1449,9 +1474,11 @@ class TwitterCollector:
         )
 
         while True:
+            await self._cleanup_expired_main_posts()
             await self._cleanup_expired_unpublished_posts()
             for username in self.usernames:
                 await self._collect_user_tweets(username)
+            await self._cleanup_expired_main_posts()
             await self._cleanup_expired_unpublished_posts()
             await asyncio.sleep(self.poll_seconds)
 

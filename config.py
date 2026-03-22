@@ -58,7 +58,7 @@ twitter_usernames = [
     for x in os.getenv("TWITTER_USERNAMES", "").split(",")
     if x.strip()
 ]
-twitter_poll_seconds = int(os.getenv("TWITTER_POLL_SECONDS", "300"))
+twitter_poll_seconds = int(os.getenv("TWITTER_POLL_SECONDS", "600"))
 twitter_fetch_limit = int(os.getenv("TWITTER_FETCH_LIMIT", "1"))
 twitter_min_hype_score = int(os.getenv("TWITTER_MIN_HYPE_SCORE", "5"))
 twitter_clean_forward_channel = os.getenv("TWITTER_CLEAN_FORWARD_CHANNEL", "").strip()
