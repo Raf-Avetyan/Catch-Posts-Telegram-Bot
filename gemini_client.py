@@ -517,6 +517,20 @@ class GeminiRewriter:
                 flags=re.UNICODE,
             ).strip()
 
+        def _merge_unique_prefix(parts: List[str]) -> str:
+            tokens: List[str] = []
+            seen = set()
+            for part in parts:
+                for token in (part or "").split():
+                    t = token.strip()
+                    if not t:
+                        continue
+                    if t in seen:
+                        continue
+                    seen.add(t)
+                    tokens.append(t)
+            return " ".join(tokens).strip()
+
         value = (text or "").strip()
         if not value:
             return value
@@ -549,8 +563,7 @@ class GeminiRewriter:
             if rest:
                 body_parts.append(rest)
             body = _strip_leading_flags_emojis("\n".join(body_parts).strip())
-            lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
-            lead_prefix = " ".join(lead_prefix_parts).strip()
+            lead_prefix = _merge_unique_prefix([lead_flags, emoji])
             lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
             return f"{lead}\n\n{body}".strip()
 
@@ -570,8 +583,7 @@ class GeminiRewriter:
             if not body_value:
                 body_value = value
         body_value = _strip_leading_flags_emojis(body_value)
-        lead_prefix_parts = [x for x in [lead_flags, emoji] if x]
-        lead_prefix = " ".join(lead_prefix_parts).strip()
+        lead_prefix = _merge_unique_prefix([lead_flags, emoji])
         lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
         return f"{lead}\n\n{body_value}".strip()
 
