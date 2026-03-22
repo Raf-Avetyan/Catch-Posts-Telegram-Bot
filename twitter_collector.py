@@ -11,7 +11,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional
-from urllib import error, request
+from urllib import error, parse, request
 
 try:
     import twikit
@@ -522,6 +522,15 @@ class TwitterCollector:
                     break
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def _build_x_compose_url(clean_text: str, media_urls: List[str]) -> str:
+        text = (clean_text or "").strip()
+        # Keep URL length safer for intent endpoint.
+        if len(text) > 1200:
+            text = text[:1197].rstrip() + "..."
+        encoded = parse.quote_plus(text)
+        return f"https://x.com/intent/tweet?text={encoded}"
+
     async def _send_to_channel_media_first(
         self,
         target_channel: str,
@@ -841,7 +850,11 @@ class TwitterCollector:
             publish_token = None
             if self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
                 publish_token = uuid.uuid4().hex[:16]
-                publish_buttons = [[Button.inline("PUBLISH", data=f"pub:{publish_token}".encode("utf-8"))]]
+                x_compose_url = self._build_x_compose_url((clean_text or "").strip(), media_urls)
+                publish_buttons = [[
+                    Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")),
+                    Button.url("X", x_compose_url),
+                ]]
 
             main_message_id = await self._send_to_channel_media_first(
                 target_channel=forward_to_channel,
