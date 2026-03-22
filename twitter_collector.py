@@ -530,15 +530,6 @@ class TwitterCollector:
     @staticmethod
     def _build_x_compose_url(clean_text: str, media_urls: List[str]) -> str:
         text = (clean_text or "").strip()
-        image_urls: List[str] = []
-        for url in media_urls:
-            lu = (url or "").lower()
-            if any(ext in lu for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif")):
-                image_urls.append(url)
-
-        if image_urls:
-            text = f"{text}\n\n" + "\n".join(image_urls[:4]) if text else "\n".join(image_urls[:4])
-
         # Keep URL length safer for intent endpoint.
         if len(text) > 1200:
             text = text[:1197].rstrip() + "..."
