@@ -14,6 +14,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib import error, parse, request
 
 try:
+    from PIL import Image
+except Exception:
+    Image = None  # type: ignore[assignment]
+
+try:
     import twikit
     from twikit import Client as TwikitClient
 except Exception:
@@ -525,6 +530,15 @@ class TwitterCollector:
     @staticmethod
     def _build_x_compose_url(clean_text: str, media_urls: List[str]) -> str:
         text = (clean_text or "").strip()
+        image_urls: List[str] = []
+        for url in media_urls:
+            lu = (url or "").lower()
+            if any(ext in lu for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif")):
+                image_urls.append(url)
+
+        if image_urls:
+            text = f"{text}\n\n" + "\n".join(image_urls[:4]) if text else "\n".join(image_urls[:4])
+
         # Keep URL length safer for intent endpoint.
         if len(text) > 1200:
             text = text[:1197].rstrip() + "..."
@@ -601,14 +615,24 @@ class TwitterCollector:
                                     )
                                 except Exception as single_exc:
                                     if "Failure while processing image" in str(single_exc):
-                                        item_sent = await self.bot_client.send_file(
-                                            target_channel,
-                                            single_path,
-                                            caption=single_caption,
-                                            parse_mode=single_pm,
-                                            force_document=True,
-                                            buttons=buttons if (can_attach_button_here and idx == 0) else None,
-                                        )
+                                        fixed = self._convert_image_to_jpeg_temp(single_path)
+                                        if fixed:
+                                            try:
+                                                item_sent = await self.bot_client.send_file(
+                                                    target_channel,
+                                                    fixed,
+                                                    caption=single_caption,
+                                                    parse_mode=single_pm,
+                                                    buttons=buttons if (can_attach_button_here and idx == 0) else None,
+                                                )
+                                            finally:
+                                                try:
+                                                    os.remove(fixed)
+                                                except OSError:
+                                                    pass
+                                        else:
+                                            print("[X][WARN] Dropping unsupported image instead of sending as file.")
+                                            continue
                                     else:
                                         raise
                                 if can_attach_button_here and idx == 0:
@@ -656,16 +680,26 @@ class TwitterCollector:
                             button_attached = True
                     except Exception as media_exc:
                         if "Failure while processing image" in str(media_exc):
-                            sent = await self.bot_client.send_file(
-                                target_channel,
-                                path,
-                                caption=caption,
-                                parse_mode=pm,
-                                force_document=True,
-                                buttons=buttons if can_attach_button_here else None,
-                            )
-                            if can_attach_button_here:
-                                button_attached = True
+                            fixed = self._convert_image_to_jpeg_temp(path)
+                            if fixed:
+                                try:
+                                    sent = await self.bot_client.send_file(
+                                        target_channel,
+                                        fixed,
+                                        caption=caption,
+                                        parse_mode=pm,
+                                        buttons=buttons if can_attach_button_here else None,
+                                    )
+                                finally:
+                                    try:
+                                        os.remove(fixed)
+                                    except OSError:
+                                        pass
+                                if can_attach_button_here:
+                                    button_attached = True
+                            else:
+                                print("[X][WARN] Dropping unsupported media instead of sending as file.")
+                                continue
                         else:
                             raise
 
@@ -753,6 +787,21 @@ class TwitterCollector:
         return paths
 
     @staticmethod
+    def _convert_image_to_jpeg_temp(path: str) -> Optional[str]:
+        if Image is None:
+            return None
+        try:
+            with Image.open(path) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                fd, out_path = tempfile.mkstemp(prefix="tweet_media_fix_", suffix=".jpg")
+                os.close(fd)
+                img.save(out_path, format="JPEG", quality=92, optimize=True)
+                return out_path
+        except Exception:
+            return None
+
+    @staticmethod
     def _format_tweet_footer(username: str, created_at: str) -> str:
         value = (created_at or "").strip()
         if value:
@@ -833,14 +882,32 @@ class TwitterCollector:
                 continue
             meta_lines_html.append(html_escape(line))
         meta_lines_html.append(html_escape(score_line))
+        meta_text_plain_lines: List[str] = []
+        if username_clean:
+            meta_text_plain_lines.append(f"@{username_clean}")
+        for line in footer_lines:
+            if line.startswith("@"):
+                continue
+            meta_text_plain_lines.append(line)
+        meta_text_plain_lines.append(score_line)
+        meta_text_plain = "\n".join([x for x in meta_text_plain_lines if x]).strip()
         meta_html = f"<blockquote>{'\n'.join(meta_lines_html).strip()}</blockquote>" if meta_lines_html else ""
         body_raw = html_escape(clean_text).strip() if clean_text else ""
         body_html = f"<pre>{body_raw}</pre>" if body_raw else ""
-        if body_html and meta_html:
-            full_html = f"{body_html}\n\n{meta_html}"
+        # Long messages can be truncated when HTML tags are split across chunks.
+        # Use safe plain-text mode for long body text.
+        use_safe_plain_mode = len(clean_text or "") > 3000
+        if use_safe_plain_mode:
+            full_payload = f"{clean_text}\n\n{meta_text_plain}".strip() if clean_text else meta_text_plain
+            payload_parse_mode: Optional[str] = None
+        elif body_html and meta_html:
+            full_payload = f"{body_html}\n\n{meta_html}"
+            payload_parse_mode = "html"
         else:
-            full_html = body_html or meta_html
-        if media_urls and len(full_html) > 1024:
+            full_payload = body_html or meta_html
+            payload_parse_mode = "html"
+
+        if media_urls and len(full_payload) > 1024:
             print(f"[X][SKIP] @{username} caption would exceed 1024 chars; not forwarding to main channel.")
             return
 
@@ -858,9 +925,9 @@ class TwitterCollector:
 
             main_message_id = await self._send_to_channel_media_first(
                 target_channel=forward_to_channel,
-                text=full_html,
+                text=full_payload,
                 media_paths=temp_media_paths,
-                parse_mode="html",
+                parse_mode=payload_parse_mode,
                 buttons=None,
             )
             print(f"[X][FORWARDED] @{username} -> {forward_to_channel}")
@@ -921,12 +988,25 @@ class TwitterCollector:
                             await self.bot_client.send_file(target_channel, batch, caption=caption)
                         except Exception as media_exc:
                             if "Failure while processing image" in str(media_exc):
-                                await self.bot_client.send_file(
-                                    target_channel,
-                                    batch,
-                                    caption=caption,
-                                    force_document=True,
-                                )
+                                for idx, single_path in enumerate(batch):
+                                    single_caption = caption if idx == 0 else None
+                                    try:
+                                        await self.bot_client.send_file(target_channel, single_path, caption=single_caption)
+                                    except Exception as single_exc:
+                                        if "Failure while processing image" in str(single_exc):
+                                            fixed = self._convert_image_to_jpeg_temp(single_path)
+                                            if fixed:
+                                                try:
+                                                    await self.bot_client.send_file(target_channel, fixed, caption=single_caption)
+                                                finally:
+                                                    try:
+                                                        os.remove(fixed)
+                                                    except OSError:
+                                                        pass
+                                            else:
+                                                print("[X][WARN] Dropping unsupported clean-channel image.")
+                                        else:
+                                            raise
                             else:
                                 raise
                 else:
@@ -945,12 +1025,21 @@ class TwitterCollector:
                             )
                         except Exception as media_exc:
                             if "Failure while processing image" in str(media_exc):
-                                await self.bot_client.send_file(
-                                    target_channel,
-                                    path,
-                                    caption=caption,
-                                    force_document=True,
-                                )
+                                fixed = self._convert_image_to_jpeg_temp(path)
+                                if fixed:
+                                    try:
+                                        await self.bot_client.send_file(
+                                            target_channel,
+                                            fixed,
+                                            caption=caption,
+                                        )
+                                    finally:
+                                        try:
+                                            os.remove(fixed)
+                                        except OSError:
+                                            pass
+                                else:
+                                    print("[X][WARN] Dropping unsupported clean-channel media.")
                             else:
                                 raise
 
