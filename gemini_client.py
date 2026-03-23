@@ -319,14 +319,13 @@ class GeminiRewriter:
         return tags[:count]
 
     def _strip_existing_hashtags(self, text: str) -> str:
-        lines = (text or "").splitlines()
-        kept: List[str] = []
-        for line in lines:
-            tokens = line.strip().split()
-            if tokens and all(token.startswith("#") for token in tokens):
-                continue
-            kept.append(line)
-        value = "\n".join(kept).strip()
+        value = (text or "")
+        # Remove hashtags anywhere in text, not only hashtag-only lines.
+        value = re.sub(r"(?<!\w)#[A-Za-z0-9_]{2,50}\b", "", value)
+        lines = [line.strip() for line in value.splitlines()]
+        # Drop lines that become empty after hashtag cleanup.
+        lines = [line for line in lines if line]
+        value = "\n".join(lines).strip()
         value = re.sub(r"[ \t]{2,}", " ", value)
         value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip()

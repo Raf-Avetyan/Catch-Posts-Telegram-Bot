@@ -1170,8 +1170,28 @@ class TwitterCollector:
                 msg_ids.append(btn_id)
 
             try:
+                # If main message belongs to a media group, delete the whole group.
+                if main_id > 0:
+                    source_msg = await self.bot_client.get_messages(channel, ids=main_id)
+                    if isinstance(source_msg, list):
+                        source_msg = source_msg[0] if source_msg else None
+                    grouped_id = getattr(source_msg, "grouped_id", None) if source_msg else None
+                    if grouped_id:
+                        from_id = max(1, int(main_id) - 30)
+                        to_id = int(main_id) + 30
+                        near_ids = list(range(from_id, to_id + 1))
+                        near_msgs = await self.bot_client.get_messages(channel, ids=near_ids)
+                        if not isinstance(near_msgs, list):
+                            near_msgs = [near_msgs] if near_msgs else []
+                        for m in near_msgs:
+                            if m is not None and getattr(m, "grouped_id", None) == grouped_id:
+                                mid = int(getattr(m, "id", 0) or 0)
+                                if mid > 0:
+                                    msg_ids.append(mid)
+
                 if msg_ids:
-                    await self.bot_client.delete_messages(channel, msg_ids)
+                    unique_ids = sorted(set(msg_ids))
+                    await self.bot_client.delete_messages(channel, unique_ids)
                 print(f"[X][CLEANUP] Deleted main forwarded post key={key} after 1h.")
             except Exception as exc:
                 print(f"[X][WARN] Failed to delete 1h-expired main post key={key}: {exc}")
@@ -1475,11 +1495,9 @@ class TwitterCollector:
 
         while True:
             await self._cleanup_expired_main_posts()
-            await self._cleanup_expired_unpublished_posts()
             for username in self.usernames:
                 await self._collect_user_tweets(username)
             await self._cleanup_expired_main_posts()
-            await self._cleanup_expired_unpublished_posts()
             await asyncio.sleep(self.poll_seconds)
 
 
