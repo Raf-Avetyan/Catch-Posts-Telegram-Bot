@@ -11,7 +11,7 @@ from urllib import error, parse, request
 class GeminiRewriter:
     def __init__(self, api_key: str, model: str, timeout_seconds: int = 20):
         self.api_key = api_key.strip()
-        self.model = model.strip() or "gemini-1.5-flash"
+        self.model = model.strip() or "gemini-2.5-flash"
         self.timeout_seconds = timeout_seconds
 
     @property
@@ -185,17 +185,125 @@ class GeminiRewriter:
             return 5
 
         prompt = (
-            "Rate how hype/newsworthy this post is on a scale from 1 to 10. "
-            "Use 1 for low-impact updates and 10 for major market-moving breaking news. "
-            "Return only one integer from 1 to 10.\n\n"
+            "Rate how hype/newsworthy this post on a scale 1-10.\n"
+            "Scoring rubric:\n"
+            "1-3: minor/no-impact updates\n"
+            "4-5: routine developments\n"
+            "6-7: meaningful market or policy impact\n"
+            "8-9: major breaking event, sanctions, hacks, liquidations, large approvals\n"
+            "10: exceptional global market-moving event\n"
+            "Return JSON only: {\"score\": <integer 1..10>}.\n\n"
             f"Post:\n{cleaned}"
         )
-        raw = (self._generate_text(prompt, temperature=0.2) or "").strip()
-        match = re.search(r"\b([1-9]|10)\b", raw)
-        if not match:
-            return 5
-        value = int(match.group(1))
-        return max(1, min(10, value))
+        raw = (self._generate_text(prompt, temperature=0.15) or "").strip()
+        model_score: Optional[int] = None
+
+        if raw:
+            # Try JSON first.
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    val = data.get("score")
+                    if isinstance(val, (int, float, str)):
+                        model_score = int(float(val))
+            except Exception:
+                # Try to extract JSON object from text.
+                try:
+                    obj_match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+                    if obj_match:
+                        data = json.loads(obj_match.group(0))
+                        val = data.get("score") if isinstance(data, dict) else None
+                        if isinstance(val, (int, float, str)):
+                            model_score = int(float(val))
+                except Exception:
+                    pass
+
+            # Fallback: numeric extraction.
+            if model_score is None:
+                match = re.search(r"\b(10|[1-9])\b", raw)
+                if match:
+                    model_score = int(match.group(1))
+
+        heuristic_score = self._heuristic_hype_score(cleaned)
+        if model_score is None:
+            return heuristic_score
+
+        model_score = max(1, min(10, model_score))
+
+        # Blend model + heuristic so neutral model outputs do not dominate.
+        blended = int(round((model_score * 0.35) + (heuristic_score * 0.65)))
+
+        # If model is neutral but heuristic is stronger, trust heuristic more.
+        if model_score == 5 and abs(heuristic_score - 5) >= 1:
+            blended = int(round((model_score * 0.2) + (heuristic_score * 0.8)))
+
+        # Additional deterministic micro-jitter to reduce many identical 5/10 outputs.
+        if blended == 5:
+            jitter = (sum(ord(c) for c in cleaned.lower()) % 5) - 2  # -2..+2
+            if jitter >= 1:
+                blended += 1
+            elif jitter <= -1:
+                blended -= 1
+
+        return max(1, min(10, blended))
+
+    @staticmethod
+    def _heuristic_hype_score(text: str) -> int:
+        value = (text or "").lower()
+        score = 5
+
+        high_terms = [
+            "breaking", "urgent", "hack", "exploit", "sanction", "lawsuit", "approved",
+            "approval", "etf", "liquidation", "bankruptcy", "ban", "cease", "sec", "cftc",
+            "fed", "fomc", "cpi", "war", "attack", "default", "tariff", "rate cut", "rate hike",
+            "all-time high", "all time high", "ath", "investigation", "settlement", "security breach",
+        ]
+        medium_terms = [
+            "launch", "partnership", "acquisition", "integration", "listing", "adoption",
+            "regulation", "policy", "treasury", "exchange", "reserve", "proposal", "filing",
+            "guidance", "framework", "roadmap", "upgrade", "mainnet",
+        ]
+        low_terms = ["faq", "recap", "weekly", "summary", "guide", "opinion", "thread"]
+
+        for term in high_terms:
+            if term in value:
+                score += 1
+        for term in medium_terms:
+            if term in value:
+                score += 0.5
+        for term in low_terms:
+            if term in value:
+                score -= 0.75
+
+        # Large percentage moves imply stronger hype.
+        percents = [int(x) for x in re.findall(r"(\d{1,3})\s*%", value)]
+        if percents:
+            mx = max(percents)
+            if mx >= 20:
+                score += 2
+            elif mx >= 10:
+                score += 1
+            elif mx >= 5:
+                score += 0.5
+
+        # Big money mention boosts score.
+        if re.search(r"\b\d+(\.\d+)?\s*(billion|million|trillion|bn|tn|m)\b", value):
+            score += 1
+
+        # Strong directional market language.
+        if re.search(r"\b(surge|soar|jump|rally|pump|crash|plunge|dump|sell[- ]off)\b", value):
+            score += 1
+
+        # Broader geopolitical/regulatory cues.
+        if re.search(r"\b(white house|congress|senate|parliament|treasury|doj|sec|cftc|eu)\b", value):
+            score += 0.5
+
+        # Deterministic small variation so not everything becomes exactly 5.
+        if int(round(score)) == 5:
+            jitter = (sum(ord(c) for c in value) % 3) - 1  # -1..+1
+            score += 0.5 * jitter
+
+        return max(1, min(10, int(round(score))))
 
     @staticmethod
     def _fallback_paraphrase(text: str) -> str:
