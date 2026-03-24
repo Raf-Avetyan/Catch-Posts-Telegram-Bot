@@ -105,7 +105,6 @@ class GeminiRewriter:
             "At the very top, ensure a one-word uppercase lead label with an emoji in this format: "
             "EMOJI WORD:, then one empty line, then the post body. "
             "Do not include source/footer labels. "
-            "At the end, add exactly 3 SEO-optimized hashtags relevant to the topic. "
             "Return only rewritten post text.\n\n"
             f"Post:\n{original}"
         )
@@ -177,7 +176,7 @@ class GeminiRewriter:
 
         result = self._normalize_lead_label(result)
         result = self._ensure_lead_banner_block(result, original)
-        return self._ensure_three_hashtags(result, original)
+        return result
 
     def get_hype_score(self, text: str) -> int:
         cleaned = self.clean_footer_text(text or "")
@@ -997,4 +996,3 @@ class GeminiRewriter:
                 break
 
         return collected_paths[:count]
-
