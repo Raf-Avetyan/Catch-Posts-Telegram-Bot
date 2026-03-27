@@ -101,9 +101,10 @@ class GeminiRewriter:
             "Keep exact meaning, facts, links, and emojis. "
             "Do not add or remove facts. "
             "Do not change the core message. "
-            "If original post starts with a headline-style lead word (for example IMPORTANT/BREAKING/LATEST), preserve that lead word. "
-            "At the very top, ensure a one-word uppercase lead label with an emoji in this format: "
-            "EMOJI WORD:, then one empty line, then the post body. "
+            "If the original post already starts with an emoji/title lead line, keep that first line unchanged. "
+            "Only rewrite the main body text below it. "
+            "If the original post has no lead line, create a one-word uppercase lead label in this format: "
+            "WORD:, then one empty line, then the post body. "
             "Do not include source/footer labels. "
             "Return only rewritten post text.\n\n"
             f"Post:\n{original}"
@@ -149,7 +150,8 @@ class GeminiRewriter:
         if similarity > 0.90 or result.strip().lower() == original.strip().lower():
             forced = self._generate_text(
                 "Rewrite this post so wording is clearly different from source while keeping facts identical. "
-                "You must change sentence openings and connectors. Keep links/numbers/entities unchanged. "
+                "You must change sentence openings, phrase order, and connectors. "
+                "Replace source phrasing wherever possible while keeping links, numbers, entities, and meaning unchanged. "
                 "Return only rewritten text.\n\n"
                 f"Source:\n{original}",
                 temperature=0.95,
@@ -176,6 +178,8 @@ class GeminiRewriter:
 
         result = self._normalize_lead_label(result)
         result = self._ensure_lead_banner_block(result, original)
+        if SequenceMatcher(a=original, b=result).ratio() > 0.90:
+            result = self._force_surface_change_preserving_source_lead(original)
         return result
 
     def get_hype_score(self, text: str) -> int:
@@ -349,6 +353,26 @@ class GeminiRewriter:
         if lead_line:
             return f"{lead_line}\n{joined}".strip()
         return joined
+
+    def _force_surface_change_preserving_source_lead(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+
+        lead_line = self._extract_exact_source_lead_line(value)
+        if not lead_line:
+            return self._force_surface_change(value)
+
+        lines = value.splitlines()
+        body_lines = lines[1:]
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+        body = "\n".join(body_lines).strip()
+        if not body:
+            return lead_line
+
+        changed_body = self._force_surface_change(body)
+        return f"{lead_line}\n\n{changed_body}".strip()
 
     @staticmethod
     def _normalize_lead_label(text: str) -> str:
@@ -548,6 +572,14 @@ class GeminiRewriter:
 
         return emoji, ""
 
+    def _extract_exact_source_lead_line(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return ""
+        first = value.splitlines()[0].strip()
+        _emoji, label = self._extract_lead_from_text(value)
+        return first if label else ""
+
     @staticmethod
     def _emoji_for_lead(word: str) -> str:
         # Default now: no auto emoji for normal news.
@@ -641,6 +673,7 @@ class GeminiRewriter:
         if not value:
             return value
 
+        source_lead_line = self._extract_exact_source_lead_line(source_text)
         src_emoji, src_label = self._extract_lead_from_text(source_text)
         src_flags = self._extract_country_flags(source_text)
         txt_flags = self._extract_country_flags(value)
@@ -655,6 +688,31 @@ class GeminiRewriter:
             flags=re.IGNORECASE,
         )
         m = lead_re.match(first)
+        inferred_emoji, inferred_label = self._extract_lead_from_text(value)
+
+        if source_lead_line:
+            body_value = value
+            if m:
+                tail = (m.group("tail") or "").strip()
+                body_parts = []
+                if tail:
+                    body_parts.append(tail)
+                if rest:
+                    body_parts.append(rest)
+                body_value = "\n".join(body_parts).strip()
+            elif inferred_label:
+                body_value = re.sub(
+                    rf"^(?:(?:[\U0001F1E6-\U0001F1FF]{{2}}|[\U0001F300-\U0001FAFF])\s*)*{re.escape(inferred_label)}\b[:\-]?\s*",
+                    "",
+                    value,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if not body_value:
+                    body_value = value
+
+            body_value = _strip_leading_flags_emojis(body_value)
+            return f"{source_lead_line}\n\n{body_value}".strip()
+
         if m:
             raw_label = (m.group("label") or "").upper().strip()
             label = src_label or raw_label
@@ -674,7 +732,6 @@ class GeminiRewriter:
             return f"{lead}\n\n{body}".strip()
 
         # If rewritten first line has a known lead without separator, remove it from body and normalize style.
-        inferred_emoji, inferred_label = self._extract_lead_from_text(value)
         label = src_label or inferred_label or self._choose_lead_word(value)
         auto_emoji = "\U0001FA78" if self._is_market_crash_news(source_text or value) else ""
         emoji = src_emoji or inferred_emoji or auto_emoji or self._emoji_for_lead(label)
