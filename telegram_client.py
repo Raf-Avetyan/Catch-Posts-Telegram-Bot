@@ -20,6 +20,7 @@ from config import (
     forwarding_enabled,
     gemini_api_key,
     gemini_model,
+    telegram_min_hype_score,
     user_session_name,
 )
 from db import Database
@@ -251,6 +252,12 @@ class TelegramChannelListener:
 
         score_input = clean_text or (text or "")
         hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
+        if hype_score < max(1, min(10, telegram_min_hype_score)):
+            print(
+                f"[INFO] Skipped forwarding post below threshold: "
+                f"{hype_score}/10 < {max(1, min(10, telegram_min_hype_score))}/10"
+            )
+            return
         score_line = f"Hype Score: {hype_score}/10"
         quoted_meta = f"> {score_line}"
         clean_text = f"{clean_text}\n\n{quoted_meta}".strip() if clean_text else quoted_meta

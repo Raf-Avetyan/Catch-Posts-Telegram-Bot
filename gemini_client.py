@@ -232,20 +232,29 @@ class GeminiRewriter:
             return heuristic_score
 
         model_score = max(1, min(10, model_score))
+        signal_score = self._signal_hype_score(cleaned)
 
-        # Blend model + heuristic so neutral model outputs do not dominate.
-        blended = int(round((model_score * 0.35) + (heuristic_score * 0.65)))
+        # Heavier heuristic weighting keeps results more varied than a neutral model default.
+        blended = int(round((model_score * 0.2) + (heuristic_score * 0.55) + (signal_score * 0.25)))
 
-        # If model is neutral but heuristic is stronger, trust heuristic more.
-        if model_score == 5 and abs(heuristic_score - 5) >= 1:
-            blended = int(round((model_score * 0.2) + (heuristic_score * 0.8)))
+        # If the model collapses to routine/neutral, trust the stronger non-model signal.
+        if model_score in {4, 5, 6}:
+            strongest_non_model = signal_score if abs(signal_score - 5) >= abs(heuristic_score - 5) else heuristic_score
+            if abs(strongest_non_model - model_score) >= 1:
+                blended = int(round((model_score * 0.1) + (heuristic_score * 0.55) + (signal_score * 0.35)))
 
-        # Additional deterministic micro-jitter to reduce many identical 5/10 outputs.
-        if blended == 5:
-            jitter = (sum(ord(c) for c in cleaned.lower()) % 5) - 2  # -2..+2
-            if jitter >= 1:
+        # Let very strong or very weak signal cases override neutral model behavior.
+        if max(heuristic_score, signal_score) >= 8 and model_score <= 6:
+            blended = max(blended, heuristic_score, signal_score)
+        if min(heuristic_score, signal_score) <= 3 and model_score >= 5:
+            blended = min(blended, max(1, min(heuristic_score, signal_score) + 1))
+
+        # Additional deterministic micro-jitter to reduce repeated identical values.
+        if blended in {4, 5, 6}:
+            jitter = (sum(ord(c) for c in cleaned.lower()) % 7) - 3  # -3..+3
+            if jitter >= 2:
                 blended += 1
-            elif jitter <= -1:
+            elif jitter <= -2:
                 blended -= 1
 
         return max(1, min(10, blended))
@@ -253,7 +262,7 @@ class GeminiRewriter:
     @staticmethod
     def _heuristic_hype_score(text: str) -> int:
         value = (text or "").lower()
-        score = 5
+        score = 4.5
 
         high_terms = [
             "breaking", "urgent", "hack", "exploit", "sanction", "lawsuit", "approved",
@@ -266,17 +275,17 @@ class GeminiRewriter:
             "regulation", "policy", "treasury", "exchange", "reserve", "proposal", "filing",
             "guidance", "framework", "roadmap", "upgrade", "mainnet",
         ]
-        low_terms = ["faq", "recap", "weekly", "summary", "guide", "opinion", "thread"]
+        low_terms = ["faq", "recap", "weekly", "summary", "guide", "opinion", "thread", "watchlist", "calendar"]
 
         for term in high_terms:
             if term in value:
-                score += 1
+                score += 1.1
         for term in medium_terms:
             if term in value:
-                score += 0.5
+                score += 0.6
         for term in low_terms:
             if term in value:
-                score -= 0.75
+                score -= 1.1
 
         # Large percentage moves imply stronger hype.
         percents = [int(x) for x in re.findall(r"(\d{1,3})\s*%", value)]
@@ -301,12 +310,49 @@ class GeminiRewriter:
         if re.search(r"\b(white house|congress|senate|parliament|treasury|doj|sec|cftc|eu)\b", value):
             score += 0.5
 
+        # Small maintenance-style or passive updates tend to be less hype.
+        if re.search(r"\b(clarifies?|faq|explains?|details?|shares?|notes?|states?)\b", value):
+            score -= 0.5
+
         # Deterministic small variation so not everything becomes exactly 5.
         if int(round(score)) == 5:
             jitter = (sum(ord(c) for c in value) % 3) - 1  # -1..+1
             score += 0.5 * jitter
 
         return max(1, min(10, int(round(score))))
+
+    @staticmethod
+    def _signal_hype_score(text: str) -> int:
+        value = (text or "").lower()
+        score = 4
+
+        if re.search(r"\b(breaking|urgent|just in|alert|massive|major)\b", value):
+            score += 2
+        if re.search(r"\b(hack|exploit|lawsuit|sanction|approval|approved|liquidation|bankruptcy|war|attack)\b", value):
+            score += 2
+        if re.search(r"\b(etf|sec|cftc|fed|fomc|cpi|tariff|rate cut|rate hike)\b", value):
+            score += 1
+        if re.search(r"\b(partnership|launch|listing|integration|adoption|upgrade|mainnet)\b", value):
+            score += 1
+        if re.search(r"\b(faq|guide|weekly|summary|opinion|thread|calendar|watchlist)\b", value):
+            score -= 2
+        if re.search(r"\b(clarif(?:y|ies)|explains?|details?|notes?|states?)\b", value):
+            score -= 1
+
+        percents = [int(x) for x in re.findall(r"(\d{1,3})\s*%", value)]
+        if percents:
+            mx = max(percents)
+            if mx >= 25:
+                score += 2
+            elif mx >= 10:
+                score += 1
+            elif mx <= 2:
+                score -= 1
+
+        if re.search(r"\b\d+(\.\d+)?\s*(billion|trillion|bn|tn)\b", value):
+            score += 1
+
+        return max(1, min(10, score))
 
     @staticmethod
     def _fallback_paraphrase(text: str) -> str:
