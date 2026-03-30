@@ -155,8 +155,8 @@ class TwitterCollector:
         self.usernames = twitter_usernames
         self.poll_seconds = max(30, twitter_poll_seconds)
         self.fetch_limit = max(1, twitter_fetch_limit)
-        self.min_hype_score = min(10, max(1, twitter_min_hype_score))
-        self.clean_min_hype_score = min(10, max(1, twitter_clean_min_hype_score))
+        self.min_hype_score = min(10, max(5, twitter_min_hype_score))
+        self.clean_min_hype_score = min(10, max(5, twitter_clean_min_hype_score))
         self.clean_forward_channel = twitter_clean_forward_channel
         self._ready = False
         self.rewriter = GeminiRewriter(api_key=gemini_api_key, model=gemini_model)

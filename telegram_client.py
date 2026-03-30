@@ -252,10 +252,11 @@ class TelegramChannelListener:
 
         score_input = clean_text or (text or "")
         hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
-        if hype_score < max(1, min(10, telegram_min_hype_score)):
+        enforced_min_hype_score = max(5, min(10, telegram_min_hype_score))
+        if hype_score < enforced_min_hype_score:
             print(
                 f"[INFO] Skipped forwarding post below threshold: "
-                f"{hype_score}/10 < {max(1, min(10, telegram_min_hype_score))}/10"
+                f"{hype_score}/10 < {enforced_min_hype_score}/10"
             )
             return
         score_line = f"Hype Score: {hype_score}/10"
