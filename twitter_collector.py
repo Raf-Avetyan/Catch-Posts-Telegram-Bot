@@ -560,22 +560,26 @@ class TwitterCollector:
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
         if not value:
-            return "Big one."
+            return "This is wild."
 
         styles = [
-            "witty",
-            "sharp",
+            "funny",
+            "hype",
             "casual",
-            "dry",
-            "confident",
-            "slightly funny",
+            "playful",
+            "sharp",
+            "punchy",
         ]
         style = styles[sum(ord(c) for c in value) % len(styles)]
         prompt = (
             f"Write one very short human reply to this X post in a {style} style. "
-            "It must sound natural and different each time depending on the post. "
-            "Use 4 to 12 words. No hashtags. No quotation marks. No markdown. "
-            "No generic filler like 'huge if true'. No emojis unless strongly fitting. "
+            "It must sound like a real person on Twitter, not a news account, analyst, or corporate brand. "
+            "Make it funny, hype, punchy, or playful depending on the post. "
+            "Use 3 to 8 words only. "
+            "No hashtags. No quotation marks. No markdown. "
+            "No role-speech, no formal tone, no boring summary, no generic filler like 'huge if true'. "
+            "Avoid repeating the headline. "
+            "A tiny slang touch is okay if natural. "
             "Return one line only.\n\n"
             f"Post:\n{value}"
         )
@@ -586,14 +590,14 @@ class TwitterCollector:
 
         lowered = value.lower()
         if any(x in lowered for x in ["hack", "exploit", "lawsuit", "sanction", "war", "attack"]):
-            return "That escalated quickly."
+            return "Yeah this got serious fast."
         if any(x in lowered for x in ["bitcoin", "btc", "ethereum", "eth", "crypto"]):
-            return "Crypto never has quiet days."
+            return "Crypto really hates being boring."
         if any(x in lowered for x in ["stock", "nasdaq", "s&p", "dow", "market"]):
-            return "Wall Street felt that one."
+            return "Wall Street is fully awake."
         if any(x in lowered for x in ["sec", "cftc", "fed", "cpi", "rates", "regulation"]):
-            return "Policy headlines move fast."
-        return f"Interesting one from @{username}." if username else "That moved fast."
+            return "Yeah this one actually matters."
+        return "Okay that is kinda huge."
 
     async def _send_to_channel_media_first(
         self,
