@@ -1076,6 +1076,12 @@ class TwitterCollector:
 
             text_value = (getattr(source_msg, "raw_text", None) or getattr(source_msg, "text", None) or "").strip()
             clean_text = self._strip_publish_meta_lines(text_value)
+            if clean_text:
+                clean_text = await asyncio.to_thread(
+                    self.rewriter._ensure_three_hashtags,
+                    clean_text,
+                    clean_text,
+                )
 
             media_paths: List[str] = []
             grouped_id = getattr(source_msg, "grouped_id", None)

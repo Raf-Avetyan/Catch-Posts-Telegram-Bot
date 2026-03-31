@@ -591,6 +591,14 @@ class GeminiRewriter:
         emoji = ((emoji_match.group("emoji") if emoji_match else "") or "").strip()
         rest = ((emoji_match.group("rest") if emoji_match else first) or "").strip()
 
+        # Explicit multi-word lead styles: "JUST IN: ..." / "JUST IN - ..."
+        multi_word_explicit = re.match(
+            r"^(?P<label>[A-Za-z][A-Za-z0-9]{1,24}(?:\s+[A-Za-z][A-Za-z0-9]{1,24}){1,2})\s*[:\-]\s*",
+            rest,
+        )
+        if multi_word_explicit:
+            return emoji, multi_word_explicit.group("label").upper().strip()
+
         # Explicit labeled styles: WORD: ... / WORD - ...
         explicit = re.match(r"^(?P<label>[A-Za-z][A-Za-z0-9]{2,24})\s*[:\-]\s*", rest)
         if explicit:
@@ -598,6 +606,7 @@ class GeminiRewriter:
 
         # Known lead words without separator, e.g. "BREAKING Bitcoin..."
         known = [
+            "JUST IN",
             "BREAKING",
             "LATEST",
             "HOT",
@@ -617,6 +626,101 @@ class GeminiRewriter:
             return emoji, caps.group("label").upper().strip()
 
         return emoji, ""
+
+    @staticmethod
+    def _split_prefix_tokens(value: str) -> List[str]:
+        text = (value or "").strip()
+        if not text:
+            return []
+        return re.findall(r"[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF]", text, flags=re.UNICODE)
+
+    @classmethod
+    def _normalize_prefix_tokens(cls, value: str) -> str:
+        return " ".join(cls._split_prefix_tokens(value)).strip()
+
+    @staticmethod
+    def _strip_duplicate_body_line(body: str, lead_line: str) -> str:
+        value = (body or "").strip()
+        normalized_lead = (lead_line or "").strip()
+        if not value or not normalized_lead:
+            return value
+
+        lines = value.splitlines()
+        if not lines:
+            return value
+
+        first = lines[0].strip()
+        if first.lower() == normalized_lead.lower():
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+            return "\n".join(lines).strip()
+        return value
+
+    @classmethod
+    def _strip_lead_from_body(cls, body: str, lead_label: str, lead_line: str = "") -> str:
+        value = cls._strip_duplicate_body_line(body, lead_line)
+        label = (lead_label or "").strip()
+        if not value:
+            return value
+        if not label:
+            return value
+
+        label_pattern = re.escape(label)
+        short_label = ""
+        if label.upper().startswith("JUST "):
+            short_label = label.split()[-1].strip()
+
+        patterns = [
+            rf"^(?:(?:[\U0001F1E6-\U0001F1FF]{{2}}|[\U0001F300-\U0001FAFF])\s*)*{label_pattern}\b[:\-]?\s*",
+        ]
+        if short_label:
+            patterns.append(
+                rf"^(?:(?:[\U0001F1E6-\U0001F1FF]{{2}}|[\U0001F300-\U0001FAFF])\s*)*{re.escape(short_label)}\b[:\-]?\s*"
+            )
+
+        for pattern in patterns:
+            updated = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+            if updated and updated != value:
+                return updated
+        return value
+
+    @staticmethod
+    def _normalize_text_for_compare(value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip()).strip().lower()
+
+    @classmethod
+    def _strip_redundant_prefix_tokens_from_body(cls, body: str, lead_prefix: str) -> str:
+        value = (body or "").strip()
+        tokens = cls._split_prefix_tokens(lead_prefix)
+        if not value or not tokens:
+            return value
+
+        variants = {
+            "".join(tokens),
+            " ".join(tokens),
+        }
+
+        for variant in variants:
+            if not variant:
+                continue
+            pattern = re.compile(rf"(^|[\.\!\?]\s+|\n+){re.escape(variant)}\s+", flags=re.UNICODE)
+            updated = pattern.sub(r"\1", value, count=1).strip()
+            if updated != value:
+                value = updated
+
+        lead_token_set = set(tokens)
+        candidate_match = re.match(
+            r"^(?P<intro>.{0,80}?(?:[\.\!\?]\s+|\n+))(?P<prefix>(?:(?:[\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001FAFF])\s*){1,4})(?P<tail>.+)$",
+            value,
+            flags=re.UNICODE | re.DOTALL,
+        )
+        if candidate_match:
+            prefix = (candidate_match.group("prefix") or "").strip()
+            prefix_tokens = cls._split_prefix_tokens(prefix)
+            if prefix_tokens and set(prefix_tokens).issubset(lead_token_set):
+                value = f"{candidate_match.group('intro')}{candidate_match.group('tail')}".strip()
+        return value
 
     def _extract_exact_source_lead_line(self, text: str) -> str:
         value = (text or "").strip()
@@ -705,7 +809,7 @@ class GeminiRewriter:
             tokens: List[str] = []
             seen = set()
             for part in parts:
-                for token in (part or "").split():
+                for token in self._split_prefix_tokens(part):
                     t = token.strip()
                     if not t:
                         continue
@@ -721,8 +825,9 @@ class GeminiRewriter:
 
         source_lead_line = self._extract_exact_source_lead_line(source_text)
         src_emoji, src_label = self._extract_lead_from_text(source_text)
-        src_flags = self._extract_country_flags(source_text)
-        txt_flags = self._extract_country_flags(value)
+        src_emoji = self._normalize_prefix_tokens(src_emoji)
+        src_flags = self._normalize_prefix_tokens(self._extract_country_flags(source_text))
+        txt_flags = self._normalize_prefix_tokens(self._extract_country_flags(value))
         lead_flags = src_flags or txt_flags
         lines = value.splitlines()
         first = lines[0].strip() if lines else ""
@@ -756,15 +861,21 @@ class GeminiRewriter:
                 if not body_value:
                     body_value = value
 
+            body_value = self._strip_lead_from_body(body_value, src_label or inferred_label, source_lead_line)
             body_value = _strip_leading_flags_emojis(body_value)
+            body_value = self._strip_redundant_prefix_tokens_from_body(body_value, src_emoji or lead_flags)
+            source_line_body = self._strip_lead_from_body(source_lead_line, src_label)
+            source_line_body = _strip_leading_flags_emojis(source_line_body)
+            if self._normalize_text_for_compare(body_value) == self._normalize_text_for_compare(source_line_body):
+                return source_lead_line.strip()
             return f"{source_lead_line}\n\n{body_value}".strip()
 
         if m:
             raw_label = (m.group("label") or "").upper().strip()
             label = src_label or raw_label
-            prefix = (m.group("prefix") or "").strip()
+            prefix = self._normalize_prefix_tokens((m.group("prefix") or "").strip())
             auto_emoji = "\U0001FA78" if self._is_market_crash_news(source_text or value) else ""
-            emoji = src_emoji or prefix or auto_emoji or self._emoji_for_lead(label)
+            emoji = self._normalize_prefix_tokens(src_emoji or prefix or auto_emoji or self._emoji_for_lead(label))
             tail = (m.group("tail") or "").strip()
 
             body_parts = []
@@ -774,25 +885,22 @@ class GeminiRewriter:
                 body_parts.append(rest)
             body = _strip_leading_flags_emojis("\n".join(body_parts).strip())
             lead_prefix = _merge_unique_prefix([lead_flags, emoji])
+            body = self._strip_redundant_prefix_tokens_from_body(body, lead_prefix)
             lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
             return f"{lead}\n\n{body}".strip()
 
         # If rewritten first line has a known lead without separator, remove it from body and normalize style.
         label = src_label or inferred_label or self._choose_lead_word(value)
         auto_emoji = "\U0001FA78" if self._is_market_crash_news(source_text or value) else ""
-        emoji = src_emoji or inferred_emoji or auto_emoji or self._emoji_for_lead(label)
+        emoji = self._normalize_prefix_tokens(src_emoji or inferred_emoji or auto_emoji or self._emoji_for_lead(label))
         body_value = value
         if inferred_label:
-            body_value = re.sub(
-                rf"^(?:(?:[\U0001F1E6-\U0001F1FF]{{2}}|[\U0001F300-\U0001FAFF])\s*)*{re.escape(inferred_label)}\b[:\-]?\s*",
-                "",
-                value,
-                flags=re.IGNORECASE,
-            ).strip()
+            body_value = self._strip_lead_from_body(value, inferred_label)
             if not body_value:
                 body_value = value
         body_value = _strip_leading_flags_emojis(body_value)
         lead_prefix = _merge_unique_prefix([lead_flags, emoji])
+        body_value = self._strip_redundant_prefix_tokens_from_body(body_value, lead_prefix)
         lead = f"{lead_prefix} {label}:".strip() if lead_prefix else f"{label}:"
         return f"{lead}\n\n{body_value}".strip()
 
