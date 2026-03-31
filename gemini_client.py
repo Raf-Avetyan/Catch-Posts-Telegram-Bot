@@ -456,7 +456,10 @@ class GeminiRewriter:
 
     def _generate_hashtags(self, source_text: str, count: int = 3) -> List[str]:
         raw = self._generate_text(
-            f"Generate exactly {count} SEO-optimized hashtags for this post topic. "
+            f"Generate exactly {count} short, topic-level, SEO-optimized hashtags for this post. "
+            "Use broad market or industry concepts, not copied filler words from the text. "
+            "Avoid generic verbs or quantities such as Added, Today, Trillion, Billion, Up, Down, Stock. "
+            "Prefer executive-style tags such as WallStreet, USMarkets, DigitalAssets, Macro, Regulation, RiskAssets when relevant. "
             "Return hashtags only separated by spaces.\n\n"
             f"Post:\n{source_text}"
         )
@@ -477,6 +480,9 @@ class GeminiRewriter:
             "your", "you", "its", "after", "before", "than", "then", "they", "them",
             "what", "when", "where", "which", "while", "also", "more", "most", "very",
             "news", "latest", "breaking", "update", "important", "crypto", "market",
+            "added", "today", "trillion", "billion", "million", "stock", "stocks",
+            "surged", "jumped", "gained", "dropped", "fell", "rose", "said", "says",
+            "share", "shares", "price", "prices", "value", "worth",
         }
         freq: Dict[str, int] = {}
         for w in words:
@@ -493,6 +499,55 @@ class GeminiRewriter:
                 tags.append(tag)
             if len(tags) >= count:
                 break
+        return tags[:count]
+
+    @staticmethod
+    def _semantic_fallback_hashtags(source_text: str, count: int = 3) -> List[str]:
+        value = (source_text or "").lower()
+        tags: List[str] = []
+
+        topic_sets = [
+            (
+                ["stock market", "stocks", "equities", "nasdaq", "s&p", "dow", "wall street"],
+                ["#WallStreet", "#USMarkets", "#Equities"],
+            ),
+            (
+                ["bitcoin", "btc", "ethereum", "eth", "crypto", "token", "blockchain", "digital asset"],
+                ["#DigitalAssets", "#CryptoMarkets", "#RiskAssets"],
+            ),
+            (
+                ["sec", "cftc", "regulation", "regulatory", "lawsuit", "approval", "etf", "filing"],
+                ["#Regulation", "#MarketStructure", "#DigitalAssets"],
+            ),
+            (
+                ["fed", "fomc", "cpi", "inflation", "rates", "rate cut", "rate hike", "treasury", "macro"],
+                ["#Macro", "#InterestRates", "#RiskAssets"],
+            ),
+            (
+                ["war", "sanction", "tariff", "iran", "china", "russia", "ukraine", "middle east"],
+                ["#Geopolitics", "#GlobalMarkets", "#MarketRisk"],
+            ),
+            (
+                ["gold", "oil", "silver", "commodity", "commodities"],
+                ["#Commodities", "#Macro", "#GlobalMarkets"],
+            ),
+        ]
+
+        for keywords, candidate_tags in topic_sets:
+            if any(keyword in value for keyword in keywords):
+                for tag in candidate_tags:
+                    if tag.lower() not in {t.lower() for t in tags}:
+                        tags.append(tag)
+                    if len(tags) >= count:
+                        return tags[:count]
+
+        if "us " in value or "u.s." in value or "united states" in value:
+            for tag in ["#USMarkets", "#GlobalMarkets", "#RiskAssets"]:
+                if tag.lower() not in {t.lower() for t in tags}:
+                    tags.append(tag)
+                if len(tags) >= count:
+                    return tags[:count]
+
         return tags[:count]
 
     def _strip_existing_hashtags(self, text: str) -> str:
@@ -517,6 +572,14 @@ class GeminiRewriter:
                 if tag.lower() not in seen:
                     tags.append(tag)
                     seen.add(tag.lower())
+
+        if len(tags) < 3:
+            for tag in self._semantic_fallback_hashtags(source_text, count=5):
+                if tag.lower() not in seen:
+                    tags.append(tag)
+                    seen.add(tag.lower())
+                if len(tags) >= 3:
+                    break
 
         if len(tags) < 3:
             for tag in self._keyword_fallback_hashtags(source_text, count=5):
