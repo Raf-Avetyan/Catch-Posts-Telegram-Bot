@@ -538,6 +538,63 @@ class TwitterCollector:
         encoded = parse.quote_plus(text)
         return f"https://x.com/intent/tweet?text={encoded}"
 
+    @staticmethod
+    def _build_tweet_url(username: str, tweet_id: Any) -> str:
+        username_clean = (username or "").strip().lstrip("@")
+        tweet_id_str = str(tweet_id or "").strip()
+        if not username_clean or not tweet_id_str:
+            return ""
+        return f"https://x.com/{username_clean}/status/{tweet_id_str}"
+
+    @staticmethod
+    def _build_x_reply_url(tweet_id: Any, reply_text: str) -> str:
+        tweet_id_str = str(tweet_id or "").strip()
+        text = (reply_text or "").strip()
+        if not tweet_id_str:
+            return ""
+        if len(text) > 240:
+            text = text[:237].rstrip() + "..."
+        encoded = parse.quote_plus(text)
+        return f"https://twitter.com/intent/tweet?in_reply_to={tweet_id_str}&text={encoded}"
+
+    def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
+        value = self._strip_publish_meta_lines(post_text or "")
+        if not value:
+            return "Big one."
+
+        styles = [
+            "witty",
+            "sharp",
+            "casual",
+            "dry",
+            "confident",
+            "slightly funny",
+        ]
+        style = styles[sum(ord(c) for c in value) % len(styles)]
+        prompt = (
+            f"Write one very short human reply to this X post in a {style} style. "
+            "It must sound natural and different each time depending on the post. "
+            "Use 4 to 12 words. No hashtags. No quotation marks. No markdown. "
+            "No generic filler like 'huge if true'. No emojis unless strongly fitting. "
+            "Return one line only.\n\n"
+            f"Post:\n{value}"
+        )
+        generated = (self.rewriter._generate_text(prompt, temperature=0.95) or "").strip()
+        generated = re.sub(r"\s+", " ", generated).strip(" \"'`")
+        if generated:
+            return generated
+
+        lowered = value.lower()
+        if any(x in lowered for x in ["hack", "exploit", "lawsuit", "sanction", "war", "attack"]):
+            return "That escalated quickly."
+        if any(x in lowered for x in ["bitcoin", "btc", "ethereum", "eth", "crypto"]):
+            return "Crypto never has quiet days."
+        if any(x in lowered for x in ["stock", "nasdaq", "s&p", "dow", "market"]):
+            return "Wall Street felt that one."
+        if any(x in lowered for x in ["sec", "cftc", "fed", "cpi", "rates", "regulation"]):
+            return "Policy headlines move fast."
+        return f"Interesting one from @{username}." if username else "That moved fast."
+
     async def _send_to_channel_media_first(
         self,
         target_channel: str,
@@ -821,6 +878,7 @@ class TwitterCollector:
     async def _forward_to_telegram(
         self,
         username: str,
+        tweet_id: Any,
         text: str,
         media_urls: List[str],
         created_at: str,
@@ -896,13 +954,18 @@ class TwitterCollector:
         try:
             publish_buttons = None
             publish_token = None
-            if self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
+            comment_text = await asyncio.to_thread(self._generate_reply_comment, clean_text or text or "", username)
+            comment_url = self._build_x_reply_url(tweet_id=tweet_id, reply_text=comment_text)
+            if self.clean_forward_channel or comment_url:
                 publish_token = uuid.uuid4().hex[:16]
                 x_compose_url = self._build_x_compose_url((clean_text or "").strip(), media_urls)
-                publish_buttons = [[
-                    Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")),
-                    Button.url("X", x_compose_url),
-                ]]
+                row = []
+                if self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
+                    row.append(Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")))
+                row.append(Button.url("X", x_compose_url))
+                if comment_url:
+                    row.append(Button.url("Comment", comment_url))
+                publish_buttons = [row] if row else None
 
             main_message_id = await self._send_to_channel_media_first(
                 target_channel=forward_to_channel,
@@ -1281,6 +1344,7 @@ class TwitterCollector:
                 )
                 await self._forward_to_telegram(
                     username=username,
+                    tweet_id=message_id,
                     text=text,
                     media_urls=media_urls,
                     created_at=created_at,
