@@ -731,6 +731,49 @@ class TwitterCollector:
         encoded = parse.quote_plus(text)
         return f"https://twitter.com/intent/tweet?in_reply_to={tweet_id_str}&text={encoded}"
 
+    @staticmethod
+    def _extract_comment_keywords(text: str) -> List[str]:
+        value = (text or "").lower()
+        words = re.findall(r"[a-z][a-z0-9]{3,24}", value)
+        stop = {
+            "this", "that", "with", "from", "have", "will", "into", "about", "their", "there",
+            "today", "latest", "breaking", "update", "live", "updates", "who", "meet", "heading",
+            "back", "very", "more", "only", "just", "really", "then", "than", "what", "when",
+            "where", "which", "while", "post", "tweet", "crew",
+        }
+        out: List[str] = []
+        for word in words:
+            if word in stop:
+                continue
+            if word not in out:
+                out.append(word)
+            if len(out) >= 8:
+                break
+        return out
+
+    def _is_relevant_comment(self, source_text: str, comment_text: str) -> bool:
+        source = (source_text or "").lower()
+        comment = (comment_text or "").lower()
+        if not source or not comment:
+            return False
+
+        keywords = self._extract_comment_keywords(source)
+        if any(keyword in comment for keyword in keywords):
+            return True
+
+        topic_aliases = [
+            {"moon", "nasa", "astronaut", "space", "artemis", "rocket"},
+            {"bitcoin", "btc", "crypto", "ethereum", "eth", "altcoin", "token"},
+            {"stocks", "stock", "equities", "nasdaq", "dow", "s&p", "wall street", "market"},
+            {"sec", "cftc", "fed", "rates", "cpi", "inflation", "regulation"},
+            {"war", "iran", "russia", "ukraine", "china", "tariff", "sanction"},
+        ]
+        for alias_group in topic_aliases:
+            if any(token in source for token in alias_group) and any(token in comment for token in alias_group):
+                return True
+
+        return False
+
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
         if not value:
@@ -819,6 +862,8 @@ class TwitterCollector:
                     continue
                 word_count = len(cleaned.split())
                 if word_count < 2 or word_count > 10:
+                    continue
+                if not self._is_relevant_comment(value, cleaned):
                     continue
                 lowered = cleaned.lower()
                 if lowered in seen:
