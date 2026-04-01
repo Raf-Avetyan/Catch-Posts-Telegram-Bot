@@ -572,26 +572,61 @@ class TwitterCollector:
             "punchy",
         ]
         style = styles[hash_value % len(styles)]
-        prompt = (
-            f"Write 5 distinct very short human replies to this X post in a {style} style. "
-            "It must sound like a real person on Twitter, not a news account, analyst, or corporate brand. "
-            "Make it funny, hype, punchy, or playful depending on the post. "
-            "Use 3 to 8 words only. "
-            "No hashtags. No quotation marks. No markdown. "
-            "No role-speech, no formal tone, no boring summary, no generic filler like 'huge if true'. "
-            "Avoid repeating the headline. "
-            "A tiny slang touch is okay if natural. "
-            "Return exactly 5 options, one per line, and make them clearly different from each other.\n\n"
-            f"Post:\n{value}"
-        )
-        generated = (self.rewriter._generate_text(prompt, temperature=0.95) or "").strip()
-        if generated:
+        prompts = [
+            (
+                f"Write 5 distinct very short human replies to this X post in a {style} style. "
+                "It must sound like a real person on Twitter, not a news account, analyst, or corporate brand. "
+                "Make it funny, hype, punchy, or playful depending on the post. "
+                "Use 3 to 8 words only. "
+                "No hashtags. No quotation marks. No markdown. "
+                "No role-speech, no formal tone, no boring summary, no generic filler like 'huge if true'. "
+                "Avoid repeating the headline. "
+                "A tiny slang touch is okay if natural. "
+                "Return exactly 5 options, one per line, and make them clearly different from each other.\n\n"
+                f"Post:\n{value}"
+            ),
+            (
+                "Write 5 short Twitter replies for this post. "
+                "Sound human, casual, a bit funny or hype, never formal. "
+                "Each reply must be 3 to 7 words. "
+                "Do not restate the headline. "
+                "No hashtags. No quotes. No markdown. "
+                "Return one option per line only.\n\n"
+                f"Post:\n{value}"
+            ),
+            (
+                "Give 5 natural one-line reactions a real person would reply with on Twitter. "
+                "Keep them short, punchy, and different. "
+                "No hashtags. No emojis unless absolutely needed. "
+                "No corporate tone. "
+                "Return only the 5 lines.\n\n"
+                f"Post:\n{value}"
+            ),
+        ]
+
+        temperatures = [0.95, 1.0, 0.85]
+        for prompt, temperature in zip(prompts, temperatures):
+            generated = (self.rewriter._generate_text(prompt, temperature=temperature) or "").strip()
+            if not generated:
+                continue
+
             options: List[str] = []
+            seen = set()
             for line in generated.splitlines():
                 cleaned = re.sub(r"^\s*[-*0-9.)]+\s*", "", line).strip()
                 cleaned = re.sub(r"\s+", " ", cleaned).strip(" \"'`")
-                if cleaned and cleaned.lower() not in {x.lower() for x in options}:
-                    options.append(cleaned)
+                cleaned = re.sub(r"[#`*_>\[\]]", "", cleaned).strip()
+                if not cleaned:
+                    continue
+                word_count = len(cleaned.split())
+                if word_count < 2 or word_count > 10:
+                    continue
+                lowered = cleaned.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                options.append(cleaned)
+
             if options:
                 return options[hash_value % len(options)]
         return ""
