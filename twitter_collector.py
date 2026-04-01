@@ -775,6 +775,33 @@ class TwitterCollector:
 
         return False
 
+    @staticmethod
+    def _is_bland_comment(comment_text: str) -> bool:
+        value = (comment_text or "").strip().lower()
+        if not value:
+            return True
+        banned_patterns = [
+            r"\bgonna be mad\b",
+            r"\bthis is big\b",
+            r"\bthis is huge\b",
+            r"\bso cool\b",
+            r"\bhumans are going\b",
+            r"\bthat is crazy\b",
+            r"\bthat is wild\b",
+            r"\bthis is wild\b",
+            r"\bthat escalated\b",
+            r"\binteresting one\b",
+        ]
+        if any(re.search(pattern, value) for pattern in banned_patterns):
+            return True
+
+        # Reject very plain subject-verb reactions with no personality.
+        words = value.split()
+        if len(words) <= 5 and not any(token in value for token in ["bro", "nah", "lol", "lmao", "yeah", "crazy", "wild"]):
+            if re.search(r"\b(is|are|be|going|mad|cool|huge|big)\b", value):
+                return True
+        return False
+
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
         if not value:
@@ -865,6 +892,8 @@ class TwitterCollector:
                 if word_count < 2 or word_count > 10:
                     continue
                 if not self._is_relevant_comment(value, cleaned):
+                    continue
+                if self._is_bland_comment(cleaned):
                     continue
                 lowered = cleaned.lower()
                 if lowered in seen:
