@@ -13,6 +13,8 @@ class GeminiRewriter:
         self.api_key = api_key.strip()
         self.model = model.strip() or "gemini-2.5-flash"
         self.timeout_seconds = timeout_seconds
+        self.last_error = ""
+        self.last_finish_reason = ""
 
     @property
     def enabled(self) -> bool:
@@ -60,7 +62,10 @@ class GeminiRewriter:
         enable_google_search: bool = False,
         temperature: float = 0.35,
     ) -> Optional[str]:
+        self.last_error = ""
+        self.last_finish_reason = ""
         if not self.enabled:
+            self.last_error = "Gemini disabled: missing API key."
             return None
 
         payload = {
@@ -80,15 +85,44 @@ class GeminiRewriter:
         try:
             with request.urlopen(req, timeout=self.timeout_seconds) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except (error.URLError, error.HTTPError, TimeoutError, json.JSONDecodeError):
+        except error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                body = ""
+            self.last_error = f"HTTP {exc.code} {exc.reason}".strip()
+            if body:
+                self.last_error = f"{self.last_error}: {body[:500]}"
+            return None
+        except error.URLError as exc:
+            self.last_error = f"URL error: {exc.reason}"
+            return None
+        except TimeoutError:
+            self.last_error = "Request timed out."
+            return None
+        except json.JSONDecodeError as exc:
+            self.last_error = f"Invalid JSON from Gemini: {exc}"
             return None
 
         for candidate in data.get("candidates") or []:
+            finish_reason = (candidate.get("finishReason") or "").strip()
+            if finish_reason:
+                self.last_finish_reason = finish_reason
             content = candidate.get("content") or {}
             for part in content.get("parts") or []:
                 text = (part.get("text") or "").strip()
                 if text:
                     return text
+
+        prompt_feedback = data.get("promptFeedback") or {}
+        block_reason = (prompt_feedback.get("blockReason") or "").strip()
+        if block_reason:
+            self.last_error = f"Gemini blocked response: {block_reason}"
+        elif self.last_finish_reason:
+            self.last_error = f"Gemini returned no text. finishReason={self.last_finish_reason}"
+        else:
+            self.last_error = "Gemini returned no usable text."
         return None
 
     def rewrite(self, text: str) -> str:

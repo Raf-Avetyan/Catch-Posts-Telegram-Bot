@@ -608,6 +608,10 @@ class TwitterCollector:
         for prompt, temperature in zip(prompts, temperatures):
             generated = (self.rewriter._generate_text(prompt, temperature=temperature) or "").strip()
             if not generated:
+                last_error = (getattr(self.rewriter, "last_error", "") or "").strip()
+                last_finish = (getattr(self.rewriter, "last_finish_reason", "") or "").strip()
+                detail = last_error or (f"finishReason={last_finish}" if last_finish else "unknown empty response")
+                print(f"[X][WARN] Gemini comment generation attempt failed @{username or 'unknown'}: {detail}")
                 continue
 
             options: List[str] = []
@@ -629,6 +633,10 @@ class TwitterCollector:
 
             if options:
                 return options[hash_value % len(options)]
+            print(
+                f"[X][WARN] Gemini comment generation returned unusable lines @{username or 'unknown'}: "
+                f"raw={generated[:300]!r}"
+            )
         return ""
 
     async def _send_to_channel_media_first(
