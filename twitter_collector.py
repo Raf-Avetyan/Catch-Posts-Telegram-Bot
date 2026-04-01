@@ -550,7 +550,7 @@ class TwitterCollector:
     def _build_x_reply_url(tweet_id: Any, reply_text: str) -> str:
         tweet_id_str = str(tweet_id or "").strip()
         text = (reply_text or "").strip()
-        if not tweet_id_str:
+        if not tweet_id_str or not text:
             return ""
         if len(text) > 240:
             text = text[:237].rstrip() + "..."
@@ -560,8 +560,9 @@ class TwitterCollector:
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
         if not value:
-            return "This is wild."
+            return ""
 
+        hash_value = sum(ord(c) for c in value)
         styles = [
             "funny",
             "hype",
@@ -570,9 +571,9 @@ class TwitterCollector:
             "sharp",
             "punchy",
         ]
-        style = styles[sum(ord(c) for c in value) % len(styles)]
+        style = styles[hash_value % len(styles)]
         prompt = (
-            f"Write one very short human reply to this X post in a {style} style. "
+            f"Write 5 distinct very short human replies to this X post in a {style} style. "
             "It must sound like a real person on Twitter, not a news account, analyst, or corporate brand. "
             "Make it funny, hype, punchy, or playful depending on the post. "
             "Use 3 to 8 words only. "
@@ -580,24 +581,20 @@ class TwitterCollector:
             "No role-speech, no formal tone, no boring summary, no generic filler like 'huge if true'. "
             "Avoid repeating the headline. "
             "A tiny slang touch is okay if natural. "
-            "Return one line only.\n\n"
+            "Return exactly 5 options, one per line, and make them clearly different from each other.\n\n"
             f"Post:\n{value}"
         )
         generated = (self.rewriter._generate_text(prompt, temperature=0.95) or "").strip()
-        generated = re.sub(r"\s+", " ", generated).strip(" \"'`")
         if generated:
-            return generated
-
-        lowered = value.lower()
-        if any(x in lowered for x in ["hack", "exploit", "lawsuit", "sanction", "war", "attack"]):
-            return "Yeah this got serious fast."
-        if any(x in lowered for x in ["bitcoin", "btc", "ethereum", "eth", "crypto"]):
-            return "Crypto really hates being boring."
-        if any(x in lowered for x in ["stock", "nasdaq", "s&p", "dow", "market"]):
-            return "Wall Street is fully awake."
-        if any(x in lowered for x in ["sec", "cftc", "fed", "cpi", "rates", "regulation"]):
-            return "Yeah this one actually matters."
-        return "Okay that is kinda huge."
+            options: List[str] = []
+            for line in generated.splitlines():
+                cleaned = re.sub(r"^\s*[-*0-9.)]+\s*", "", line).strip()
+                cleaned = re.sub(r"\s+", " ", cleaned).strip(" \"'`")
+                if cleaned and cleaned.lower() not in {x.lower() for x in options}:
+                    options.append(cleaned)
+            if options:
+                return options[hash_value % len(options)]
+        return ""
 
     async def _send_to_channel_media_first(
         self,
