@@ -104,10 +104,15 @@ from config import (
     api_hash,
     api_id,
     bot_token,
+    comment_ai_provider,
     forward_to_channel,
     forwarding_enabled,
     gemini_api_key,
     gemini_model,
+    openrouter_api_key,
+    openrouter_app_name,
+    openrouter_model,
+    openrouter_site_url,
     twitter_bot_session_name,
     twitter_account_email,
     twitter_account_email_password,
@@ -170,6 +175,12 @@ class TwitterCollector:
         self.main_post_ttl_seconds = 60 * 60
         self._main_post_cleanup_jobs: Dict[str, Dict[str, Any]] = {}
         self._gemini_comment_disabled_until_ts = 0.0
+        self.comment_ai_provider = comment_ai_provider or "openrouter"
+        self.openrouter_api_key = openrouter_api_key
+        self.openrouter_model = openrouter_model or "openrouter/auto"
+        self.openrouter_site_url = openrouter_site_url
+        self.openrouter_app_name = openrouter_app_name or "Catch Posts Bot"
+        self._comment_ai_last_error = ""
 
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
@@ -203,6 +214,69 @@ class TwitterCollector:
             except ValueError:
                 return 0.0
         return 0.0
+
+    def _generate_openrouter_text(self, prompt: str, temperature: float = 0.9) -> str:
+        self._comment_ai_last_error = ""
+        if not self.openrouter_api_key:
+            self._comment_ai_last_error = "OpenRouter disabled: missing OPENROUTER_API_KEY."
+            return ""
+
+        payload = {
+            "model": self.openrouter_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.openrouter_site_url:
+            headers["HTTP-Referer"] = self.openrouter_site_url
+        if self.openrouter_app_name:
+            headers["X-Title"] = self.openrouter_app_name
+
+        req = request.Request(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            method="POST",
+            headers=headers,
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        try:
+            with request.urlopen(req, timeout=25) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                body = ""
+            self._comment_ai_last_error = f"OpenRouter HTTP {exc.code} {exc.reason}".strip()
+            if body:
+                self._comment_ai_last_error = f"{self._comment_ai_last_error}: {body[:500]}"
+            return ""
+        except error.URLError as exc:
+            self._comment_ai_last_error = f"OpenRouter URL error: {exc.reason}"
+            return ""
+        except TimeoutError:
+            self._comment_ai_last_error = "OpenRouter request timed out."
+            return ""
+        except json.JSONDecodeError as exc:
+            self._comment_ai_last_error = f"OpenRouter invalid JSON: {exc}"
+            return ""
+
+        choices = data.get("choices") or []
+        for choice in choices:
+            message = choice.get("message") or {}
+            content = (message.get("content") or "").strip()
+            if content:
+                return content
+
+        err = data.get("error") or {}
+        if isinstance(err, dict) and err.get("message"):
+            self._comment_ai_last_error = f"OpenRouter error: {err.get('message')}"
+        else:
+            self._comment_ai_last_error = "OpenRouter returned no usable text."
+        return ""
 
     async def _get_twikit_cookie_header(self) -> str:
         if TwikitClient is None:
@@ -515,6 +589,10 @@ class TwitterCollector:
             await self.bot_client.start(bot_token=bot_token)
             self.bot_client.add_event_handler(self._on_publish_click, events.CallbackQuery(pattern=b"^pub:"))
             print(f"[X][INFO] Twitter forwarding target: {forward_to_channel}")
+            if self.comment_ai_provider == "openrouter" and self.openrouter_api_key:
+                print(f"[X][INFO] Comment AI provider: OpenRouter ({self.openrouter_model})")
+            else:
+                print(f"[X][INFO] Comment AI provider: Gemini ({gemini_model})")
         except Exception as exc:
             self.bot_client = None
             print(f"[X][ERROR] Failed to start Twitter forward bot: {exc}")
@@ -558,6 +636,10 @@ class TwitterCollector:
     @staticmethod
     def _build_x_compose_url(clean_text: str, media_urls: List[str]) -> str:
         text = (clean_text or "").strip()
+        if text:
+            text = f"{text}\n\nMore updates in Telegram (link in bio)"
+        else:
+            text = "More updates in Telegram (link in bio)"
         # Keep URL length safer for intent endpoint.
         if len(text) > 1200:
             text = text[:1197].rstrip() + "..."
@@ -604,28 +686,31 @@ class TwitterCollector:
             (
                 f"Write 5 distinct very short human replies to this X post in a {style} style. "
                 "It must sound like a real person on Twitter, not a news account, analyst, or corporate brand. "
-                "Make it funny, hype, punchy, or playful depending on the post. "
-                "Use 3 to 8 words only. "
+                "Make it funny, interesting, hype, punchy, or playful depending on the post. "
+                "Use 3 to 12 words only. "
                 "No hashtags. No quotation marks. No markdown. "
                 "No role-speech, no formal tone, no boring summary, no generic filler like 'huge if true'. "
                 "Avoid repeating the headline. "
                 "A tiny slang touch is okay if natural. "
+                "A laughing emoji like 😂, 🤣, or 😭 is allowed when it genuinely fits and makes the reply feel more human. "
                 "Return exactly 5 options, one per line, and make them clearly different from each other.\n\n"
                 f"Post:\n{value}"
             ),
             (
                 "Write 5 short Twitter replies for this post. "
-                "Sound human, casual, a bit funny or hype, never formal. "
+                "Sound human, casual, funny, interesting, or hype, never formal. "
                 "Each reply must be 3 to 7 words. "
                 "Do not restate the headline. "
                 "No hashtags. No quotes. No markdown. "
+                "You may use one laughing-style emoji like 😂, 🤣, or 😭 if it feels natural. "
                 "Return one option per line only.\n\n"
                 f"Post:\n{value}"
             ),
             (
                 "Give 5 natural one-line reactions a real person would reply with on Twitter. "
-                "Keep them short, punchy, and different. "
-                "No hashtags. No emojis unless absolutely needed. "
+                "Keep them short, punchy, funny, interesting, and different. "
+                "No hashtags. "
+                "A laughing emoji like 😂, 🤣, or 😭 is okay if it improves the reaction. "
                 "No corporate tone. "
                 "Return only the 5 lines.\n\n"
                 f"Post:\n{value}"
@@ -634,12 +719,21 @@ class TwitterCollector:
 
         temperatures = [0.95, 1.0, 0.85]
         for prompt, temperature in zip(prompts, temperatures):
-            generated = (self.rewriter._generate_text(prompt, temperature=temperature) or "").strip()
+            generated = ""
+            provider = self.comment_ai_provider
+            if provider == "openrouter":
+                generated = (self._generate_openrouter_text(prompt, temperature=temperature) or "").strip()
+                if not generated:
+                    detail = (self._comment_ai_last_error or "").strip() or "unknown empty response"
+                    print(f"[X][WARN] OpenRouter comment generation attempt failed @{username or 'unknown'}: {detail}")
+            if not generated and provider != "gemini":
+                generated = (self.rewriter._generate_text(prompt, temperature=temperature) or "").strip()
             if not generated:
                 last_error = (getattr(self.rewriter, "last_error", "") or "").strip()
                 last_finish = (getattr(self.rewriter, "last_finish_reason", "") or "").strip()
                 detail = last_error or (f"finishReason={last_finish}" if last_finish else "unknown empty response")
-                print(f"[X][WARN] Gemini comment generation attempt failed @{username or 'unknown'}: {detail}")
+                provider_name = "Gemini" if provider != "openrouter" or not self.openrouter_api_key else "OpenRouter->Gemini fallback"
+                print(f"[X][WARN] {provider_name} comment generation attempt failed @{username or 'unknown'}: {detail}")
                 retry_after_seconds = self._extract_retry_after_seconds(detail)
                 if "429" in detail or "RESOURCE_EXHAUSTED" in detail or "quota" in detail.lower():
                     self._disable_gemini_comment_temporarily(

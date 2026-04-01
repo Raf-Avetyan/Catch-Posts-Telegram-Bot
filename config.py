@@ -51,6 +51,11 @@ forwarding_enabled = bool(bot_token and forward_to_channel)
 gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
 gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 telegram_min_hype_score = int(os.getenv("TELEGRAM_MIN_HYPE_SCORE", "5"))
+comment_ai_provider = os.getenv("COMMENT_AI_PROVIDER", "openrouter").strip().lower()
+openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto").strip()
+openrouter_site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
+openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Catch Posts Bot").strip()
 
 # Twitter collector settings
 twitter_enabled = os.getenv("TWITTER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
