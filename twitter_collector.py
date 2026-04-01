@@ -278,6 +278,72 @@ class TwitterCollector:
             self._comment_ai_last_error = "OpenRouter returned no usable text."
         return ""
 
+    def _rewrite_tweet_text(self, text: str) -> str:
+        original = self.rewriter.clean_footer_text(text or "")
+        if not original:
+            return original
+
+        prompts = [
+            (
+                "Rewrite this Telegram post by changing wording and sentence structure. "
+                "Keep exact meaning, facts, links, and emojis. "
+                "Do not add or remove facts. "
+                "Do not change the core message. "
+                "If the original post already starts with an emoji/title lead line, keep that first line unchanged. "
+                "Only rewrite the main body text below it. "
+                "If the original post has no lead line, create a one-word uppercase lead label in this format: "
+                "WORD:, then one empty line, then the post body. "
+                "Do not include source/footer labels. "
+                "Return only rewritten post text.\n\n"
+                f"Post:\n{original}"
+            ),
+            (
+                "Paraphrase this post more strongly while preserving exact meaning, links, emojis, and facts. "
+                "Ensure noticeably different wording and sentence structure. "
+                "If there is a lead label, use BREAKING or LATEST, not KEY. "
+                "Return only paraphrased text.\n\n"
+                f"Post:\n{original}"
+            ),
+            (
+                "Rewrite this post with strong wording changes while preserving all facts and links exactly. "
+                "Use a different sentence flow from the source. "
+                "Do not copy source phrases except proper nouns, numbers, or links. "
+                "Return only the final rewritten text.\n\n"
+                f"Source:\n{original}"
+            ),
+        ]
+        temperatures = [0.6, 0.85, 0.95]
+
+        best = original
+        best_similarity = 1.0
+        for prompt, temperature in zip(prompts, temperatures):
+            candidate = ""
+            if self.openrouter_api_key:
+                candidate = self._generate_openrouter_text(prompt, temperature=temperature).strip()
+                if not candidate and self._comment_ai_last_error:
+                    print(f"[X][WARN] OpenRouter rewrite attempt failed: {self._comment_ai_last_error}")
+            if not candidate:
+                candidate = (self.rewriter._generate_text(prompt, temperature=temperature) or "").strip()
+                if not candidate:
+                    last_error = (getattr(self.rewriter, "last_error", "") or "").strip()
+                    if last_error:
+                        print(f"[X][WARN] Gemini rewrite attempt failed: {last_error}")
+                    continue
+
+            cleaned = self.rewriter.clean_footer_text(candidate) or original
+            cleaned = self.rewriter._normalize_lead_label(cleaned)
+            cleaned = self.rewriter._ensure_lead_banner_block(cleaned, original)
+            similarity = SequenceMatcher(a=original, b=cleaned).ratio()
+            if similarity < best_similarity:
+                best = cleaned
+                best_similarity = similarity
+            if similarity <= 0.86 and cleaned.strip().lower() != original.strip().lower():
+                return cleaned
+
+        if best.strip().lower() != original.strip().lower():
+            return best
+        return self.rewriter._force_surface_change_preserving_source_lead(original)
+
     async def _get_twikit_cookie_header(self) -> str:
         if TwikitClient is None:
             return ""
@@ -1064,8 +1130,8 @@ class TwitterCollector:
             return
 
         clean_text = self.rewriter.clean_footer_text(text)
-        if clean_text and self.rewriter.enabled:
-            rewritten = await asyncio.to_thread(self.rewriter.rewrite, clean_text)
+        if clean_text and (self.rewriter.enabled or self.openrouter_api_key):
+            rewritten = await asyncio.to_thread(self._rewrite_tweet_text, clean_text)
             if rewritten:
                 clean_text = self.rewriter.clean_footer_text(rewritten)
         clean_text = self._strip_author_profile_links(clean_text, username)
