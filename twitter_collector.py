@@ -957,6 +957,8 @@ class TwitterCollector:
             publish_token = None
             comment_text = await asyncio.to_thread(self._generate_reply_comment, clean_text or text or "", username)
             comment_url = self._build_x_reply_url(tweet_id=tweet_id, reply_text=comment_text)
+            if not comment_url:
+                comment_url = self._build_tweet_url(username=username, tweet_id=tweet_id)
             if self.clean_forward_channel or comment_url:
                 publish_token = uuid.uuid4().hex[:16]
                 x_compose_url = self._build_x_compose_url((clean_text or "").strip(), media_urls)
