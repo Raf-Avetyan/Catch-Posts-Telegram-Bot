@@ -169,6 +169,7 @@ class TwitterCollector:
         self.unpublished_ttl_seconds = 24 * 60 * 60
         self.main_post_ttl_seconds = 60 * 60
         self._main_post_cleanup_jobs: Dict[str, Dict[str, Any]] = {}
+        self._gemini_comment_disabled_until_ts = 0.0
 
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
@@ -177,6 +178,31 @@ class TwitterCollector:
         self._twikit_disabled_until_ts = max(self._twikit_disabled_until_ts, time.time() + max(60, seconds))
         until = datetime.fromtimestamp(self._twikit_disabled_until_ts).isoformat(timespec="seconds")
         print(f"[X][WARN] Twikit temporarily disabled until {until} ({reason}).")
+
+    def _gemini_comment_disabled(self) -> bool:
+        return time.time() < self._gemini_comment_disabled_until_ts
+
+    def _disable_gemini_comment_temporarily(self, seconds: float, reason: str) -> None:
+        seconds = max(15.0, float(seconds))
+        self._gemini_comment_disabled_until_ts = max(
+            self._gemini_comment_disabled_until_ts,
+            time.time() + seconds,
+        )
+        until = datetime.fromtimestamp(self._gemini_comment_disabled_until_ts).isoformat(timespec="seconds")
+        print(f"[X][WARN] Gemini comment generation paused until {until} ({reason}).")
+
+    @staticmethod
+    def _extract_retry_after_seconds(error_text: str) -> float:
+        value = (error_text or "").strip()
+        if not value:
+            return 0.0
+        match = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)s", value, flags=re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return 0.0
+        return 0.0
 
     async def _get_twikit_cookie_header(self) -> str:
         if TwikitClient is None:
@@ -561,6 +587,8 @@ class TwitterCollector:
         value = self._strip_publish_meta_lines(post_text or "")
         if not value:
             return ""
+        if self._gemini_comment_disabled():
+            return ""
 
         hash_value = sum(ord(c) for c in value)
         styles = [
@@ -612,6 +640,13 @@ class TwitterCollector:
                 last_finish = (getattr(self.rewriter, "last_finish_reason", "") or "").strip()
                 detail = last_error or (f"finishReason={last_finish}" if last_finish else "unknown empty response")
                 print(f"[X][WARN] Gemini comment generation attempt failed @{username or 'unknown'}: {detail}")
+                retry_after_seconds = self._extract_retry_after_seconds(detail)
+                if "429" in detail or "RESOURCE_EXHAUSTED" in detail or "quota" in detail.lower():
+                    self._disable_gemini_comment_temporarily(
+                        retry_after_seconds or 60.0,
+                        "Gemini quota/rate limit reached",
+                    )
+                    return ""
                 continue
 
             options: List[str] = []
