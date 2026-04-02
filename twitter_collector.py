@@ -733,11 +733,8 @@ class TwitterCollector:
             row.append(Button.inline("TELEGRAM", data=f"pub:{token}".encode("utf-8")))
         if x_compose_url:
             row.append(Button.url("X", x_compose_url))
-        if comment_url:
-            if comment_used:
-                row.append(Button.inline("Comment Used", data=b"noop"))
-            else:
-                row.append(Button.inline("Comment", data=f"cmt:{token}".encode("utf-8")))
+        if comment_url and not comment_used:
+            row.append(Button.inline("Comment", data=f"cmt:{token}".encode("utf-8")))
         return [row] if row else None
 
     @staticmethod
@@ -1567,7 +1564,13 @@ class TwitterCollector:
             buttons = self._build_publish_buttons_for_job(token, job)
             button_message_id = int(job.get("button_message_id") or 0)
             channel = str(job.get("channel") or forward_to_channel)
-            if button_message_id and buttons is not None:
+            edited = False
+            try:
+                await event.edit(buttons=buttons)
+                edited = True
+            except Exception as inline_exc:
+                print(f"[X][WARN] Direct callback button update failed token={token}: {inline_exc}")
+            if not edited and button_message_id:
                 await self.bot_client.edit_message(channel, button_message_id, buttons=buttons)
         except Exception as exc:
             print(f"[X][WARN] Failed to disable Comment button token={token}: {exc}")
