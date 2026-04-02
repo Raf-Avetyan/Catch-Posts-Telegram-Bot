@@ -655,7 +655,6 @@ class TwitterCollector:
             self.bot_client = TelegramClient(twitter_bot_session_name, api_id, api_hash)
             await self.bot_client.start(bot_token=bot_token)
             self.bot_client.add_event_handler(self._on_publish_click, events.CallbackQuery(pattern=b"^pub:"))
-            self.bot_client.add_event_handler(self._on_comment_click, events.CallbackQuery(pattern=b"^cmt:"))
             print(f"[X][INFO] Twitter forwarding target: {forward_to_channel}")
             if self.comment_ai_provider == "openrouter" and self.openrouter_api_key:
                 print(f"[X][INFO] Comment AI provider: OpenRouter ({self.openrouter_model})")
@@ -733,8 +732,8 @@ class TwitterCollector:
             row.append(Button.inline("TELEGRAM", data=f"pub:{token}".encode("utf-8")))
         if x_compose_url:
             row.append(Button.url("X", x_compose_url))
-        if comment_url and not comment_used:
-            row.append(Button.inline("Comment", data=f"cmt:{token}".encode("utf-8")))
+        if comment_url:
+            row.append(Button.url("Comment", comment_url))
         return [row] if row else None
 
     @staticmethod
@@ -1535,57 +1534,6 @@ class TwitterCollector:
                         os.remove(p)
                 except OSError:
                     pass
-
-    async def _on_comment_click(self, event: events.CallbackQuery.Event) -> None:
-        if not self.bot_client:
-            return
-        data = (event.data or b"").decode("utf-8", errors="ignore")
-        if not data.startswith("cmt:"):
-            return
-        token = data.split(":", 1)[1].strip()
-        if not token:
-            await event.answer("Invalid comment token.", alert=True)
-            return
-        job = self._publish_jobs.get(token)
-        if not job:
-            await event.answer("Comment data expired.", alert=True)
-            return
-        if job.get("comment_used"):
-            await event.answer("Comment already used.", alert=False)
-            return
-
-        comment_url = str(job.get("comment_url") or "")
-        if not comment_url:
-            await event.answer("Comment URL missing.", alert=True)
-            return
-
-        job["comment_used"] = True
-        try:
-            await event.answer(url=comment_url)
-        except Exception as exc:
-            print(f"[X][WARN] Failed to open comment URL token={token}: {exc}")
-            await event.answer("Opening comment failed.", alert=True)
-            job["comment_used"] = False
-            return
-
-        async def _remove_comment_button_later() -> None:
-            await asyncio.sleep(1.0)
-            try:
-                buttons = self._build_publish_buttons_for_job(token, job)
-                button_message_id = int(job.get("button_message_id") or 0)
-                channel = str(job.get("channel") or forward_to_channel)
-                edited = False
-                try:
-                    await event.edit(buttons=buttons)
-                    edited = True
-                except Exception as inline_exc:
-                    print(f"[X][WARN] Direct callback button update failed token={token}: {inline_exc}")
-                if not edited and button_message_id:
-                    await self.bot_client.edit_message(channel, button_message_id, buttons=buttons)
-            except Exception as exc:
-                print(f"[X][WARN] Failed to disable Comment button token={token}: {exc}")
-
-        asyncio.create_task(_remove_comment_button_later())
 
     async def _cleanup_expired_unpublished_posts(self) -> None:
         if not self.bot_client or not self._publish_jobs:
