@@ -1561,25 +1561,31 @@ class TwitterCollector:
 
         job["comment_used"] = True
         try:
-            buttons = self._build_publish_buttons_for_job(token, job)
-            button_message_id = int(job.get("button_message_id") or 0)
-            channel = str(job.get("channel") or forward_to_channel)
-            edited = False
-            try:
-                await event.edit(buttons=buttons)
-                edited = True
-            except Exception as inline_exc:
-                print(f"[X][WARN] Direct callback button update failed token={token}: {inline_exc}")
-            if not edited and button_message_id:
-                await self.bot_client.edit_message(channel, button_message_id, buttons=buttons)
-        except Exception as exc:
-            print(f"[X][WARN] Failed to disable Comment button token={token}: {exc}")
-
-        try:
             await event.answer(url=comment_url)
         except Exception as exc:
             print(f"[X][WARN] Failed to open comment URL token={token}: {exc}")
             await event.answer("Opening comment failed.", alert=True)
+            job["comment_used"] = False
+            return
+
+        async def _remove_comment_button_later() -> None:
+            await asyncio.sleep(1.0)
+            try:
+                buttons = self._build_publish_buttons_for_job(token, job)
+                button_message_id = int(job.get("button_message_id") or 0)
+                channel = str(job.get("channel") or forward_to_channel)
+                edited = False
+                try:
+                    await event.edit(buttons=buttons)
+                    edited = True
+                except Exception as inline_exc:
+                    print(f"[X][WARN] Direct callback button update failed token={token}: {inline_exc}")
+                if not edited and button_message_id:
+                    await self.bot_client.edit_message(channel, button_message_id, buttons=buttons)
+            except Exception as exc:
+                print(f"[X][WARN] Failed to disable Comment button token={token}: {exc}")
+
+        asyncio.create_task(_remove_comment_button_later())
 
     async def _cleanup_expired_unpublished_posts(self) -> None:
         if not self.bot_client or not self._publish_jobs:
