@@ -938,7 +938,7 @@ class TwitterCollector:
                 if word_count < 2 or word_count > 10:
                     continue
                 lowered = cleaned.lower()
-                salvage_candidate = self._inject_required_reaction_emoji(cleaned)
+                salvage_candidate = cleaned
                 salvage_lowered = salvage_candidate.lower()
                 if salvage_lowered not in salvage_seen and not self._is_bland_comment(salvage_candidate):
                     salvage_seen.add(salvage_lowered)
@@ -946,7 +946,6 @@ class TwitterCollector:
 
                 if lowered in seen:
                     continue
-                cleaned = self._inject_required_reaction_emoji(cleaned)
                 if not self._is_relevant_comment(value, cleaned):
                     continue
                 if self._is_bland_comment(cleaned):
