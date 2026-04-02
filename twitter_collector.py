@@ -655,6 +655,7 @@ class TwitterCollector:
             self.bot_client = TelegramClient(twitter_bot_session_name, api_id, api_hash)
             await self.bot_client.start(bot_token=bot_token)
             self.bot_client.add_event_handler(self._on_publish_click, events.CallbackQuery(pattern=b"^pub:"))
+            self.bot_client.add_event_handler(self._on_comment_click, events.CallbackQuery(pattern=b"^cmt:"))
             print(f"[X][INFO] Twitter forwarding target: {forward_to_channel}")
             if self.comment_ai_provider == "openrouter" and self.openrouter_api_key:
                 print(f"[X][INFO] Comment AI provider: OpenRouter ({self.openrouter_model})")
@@ -720,6 +721,24 @@ class TwitterCollector:
         if not username_clean or not tweet_id_str:
             return ""
         return f"https://x.com/{username_clean}/status/{tweet_id_str}"
+
+    def _build_publish_buttons_for_job(self, token: str, job: Dict[str, Any]) -> Optional[List[List[Any]]]:
+        row: List[Any] = []
+        clean_channel = str(job.get("clean_channel") or "")
+        x_compose_url = str(job.get("x_compose_url") or "")
+        comment_url = str(job.get("comment_url") or "")
+        comment_used = bool(job.get("comment_used"))
+
+        if clean_channel and clean_channel != forward_to_channel:
+            row.append(Button.inline("TELEGRAM", data=f"pub:{token}".encode("utf-8")))
+        if x_compose_url:
+            row.append(Button.url("X", x_compose_url))
+        if comment_url:
+            if comment_used:
+                row.append(Button.inline("Comment Used", data=b"noop"))
+            else:
+                row.append(Button.inline("Comment", data=f"cmt:{token}".encode("utf-8")))
+        return [row] if row else None
 
     @staticmethod
     def _build_x_reply_url(tweet_id: Any, reply_text: str) -> str:
@@ -801,6 +820,12 @@ class TwitterCollector:
             if re.search(r"\b(is|are|be|going|mad|cool|huge|big)\b", value):
                 return True
         return False
+
+    @staticmethod
+    def _has_required_reaction_emoji(comment_text: str) -> bool:
+        value = comment_text or ""
+        required = ["😂", "🤣", "😭"]
+        return any(emoji in value for emoji in required)
 
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
@@ -891,10 +916,13 @@ class TwitterCollector:
                 cleaned = re.sub(r"^\s*[-*0-9.)]+\s*", "", line).strip()
                 cleaned = re.sub(r"\s+", " ", cleaned).strip(" \"'`")
                 cleaned = re.sub(r"[#`*_>\[\]]", "", cleaned).strip()
+                cleaned = cleaned.rstrip(".")
                 if not cleaned:
                     continue
                 word_count = len(cleaned.split())
                 if word_count < 2 or word_count > 10:
+                    continue
+                if not self._has_required_reaction_emoji(cleaned):
                     continue
                 if not self._is_relevant_comment(value, cleaned):
                     continue
@@ -1285,7 +1313,7 @@ class TwitterCollector:
                     row.append(Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")))
                 row.append(Button.url("X", x_compose_url))
                 if comment_url:
-                    row.append(Button.url("Comment", comment_url))
+                    row.append(Button.inline("Comment", data=f"cmt:{publish_token}".encode("utf-8")))
                 publish_buttons = [row] if row else None
 
             main_message_id = await self._send_to_channel_media_first(
@@ -1311,6 +1339,9 @@ class TwitterCollector:
                     "username": username,
                     "hype_score": hype_score,
                     "clean_channel": self.clean_forward_channel,
+                    "x_compose_url": x_compose_url,
+                    "comment_url": comment_url,
+                    "comment_used": False,
                     "published": False,
                     "created_ts": time.time(),
                 }
@@ -1507,6 +1538,45 @@ class TwitterCollector:
                         os.remove(p)
                 except OSError:
                     pass
+
+    async def _on_comment_click(self, event: events.CallbackQuery.Event) -> None:
+        if not self.bot_client:
+            return
+        data = (event.data or b"").decode("utf-8", errors="ignore")
+        if not data.startswith("cmt:"):
+            return
+        token = data.split(":", 1)[1].strip()
+        if not token:
+            await event.answer("Invalid comment token.", alert=True)
+            return
+        job = self._publish_jobs.get(token)
+        if not job:
+            await event.answer("Comment data expired.", alert=True)
+            return
+        if job.get("comment_used"):
+            await event.answer("Comment already used.", alert=False)
+            return
+
+        comment_url = str(job.get("comment_url") or "")
+        if not comment_url:
+            await event.answer("Comment URL missing.", alert=True)
+            return
+
+        job["comment_used"] = True
+        try:
+            buttons = self._build_publish_buttons_for_job(token, job)
+            button_message_id = int(job.get("button_message_id") or 0)
+            channel = str(job.get("channel") or forward_to_channel)
+            if button_message_id and buttons is not None:
+                await self.bot_client.edit_message(channel, button_message_id, buttons=buttons)
+        except Exception as exc:
+            print(f"[X][WARN] Failed to disable Comment button token={token}: {exc}")
+
+        try:
+            await event.answer(url=comment_url)
+        except Exception as exc:
+            print(f"[X][WARN] Failed to open comment URL token={token}: {exc}")
+            await event.answer("Opening comment failed.", alert=True)
 
     async def _cleanup_expired_unpublished_posts(self) -> None:
         if not self.bot_client or not self._publish_jobs:
