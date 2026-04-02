@@ -726,7 +726,6 @@ class TwitterCollector:
         clean_channel = str(job.get("clean_channel") or "")
         x_compose_url = str(job.get("x_compose_url") or "")
         comment_url = str(job.get("comment_url") or "")
-        comment_used = bool(job.get("comment_used"))
 
         if clean_channel and clean_channel != forward_to_channel:
             row.append(Button.inline("TELEGRAM", data=f"pub:{token}".encode("utf-8")))
@@ -1309,7 +1308,7 @@ class TwitterCollector:
                     row.append(Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")))
                 row.append(Button.url("X", x_compose_url))
                 if comment_url:
-                    row.append(Button.inline("Comment", data=f"cmt:{publish_token}".encode("utf-8")))
+                    row.append(Button.url("Comment", comment_url))
                 publish_buttons = [row] if row else None
 
             main_message_id = await self._send_to_channel_media_first(
@@ -1337,7 +1336,6 @@ class TwitterCollector:
                     "clean_channel": self.clean_forward_channel,
                     "x_compose_url": x_compose_url,
                     "comment_url": comment_url,
-                    "comment_used": False,
                     "published": False,
                     "created_ts": time.time(),
                 }
