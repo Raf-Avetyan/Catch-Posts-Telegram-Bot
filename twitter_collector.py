@@ -773,7 +773,8 @@ class TwitterCollector:
             return False
 
         keywords = self._extract_comment_keywords(source)
-        if any(keyword in comment for keyword in keywords):
+        matched_keywords = [keyword for keyword in keywords if keyword in comment]
+        if matched_keywords:
             return True
 
         topic_aliases = [
@@ -782,6 +783,9 @@ class TwitterCollector:
             {"stocks", "stock", "equities", "nasdaq", "dow", "s&p", "wall street", "market"},
             {"sec", "cftc", "fed", "rates", "cpi", "inflation", "regulation"},
             {"war", "iran", "russia", "ukraine", "china", "tariff", "sanction"},
+            {"trump", "white house", "president", "election", "gop", "democrat"},
+            {"tesla", "elon", "musk", "spacex", "starlink"},
+            {"media", "broadcast", "news", "anchor", "press"},
         ]
         for alias_group in topic_aliases:
             if any(token in source for token in alias_group) and any(token in comment for token in alias_group):
@@ -821,6 +825,20 @@ class TwitterCollector:
         value = comment_text or ""
         required = ["😂", "🤣", "😭"]
         return any(emoji in value for emoji in required)
+
+    @staticmethod
+    def _has_required_reaction_emoji_clean(comment_text: str) -> bool:
+        value = comment_text or ""
+        return any(emoji in value for emoji in ["😂", "🤣", "😭"])
+
+    @staticmethod
+    def _inject_required_reaction_emoji(comment_text: str) -> str:
+        value = (comment_text or "").strip().rstrip(".")
+        if not value:
+            return value
+        if TwitterCollector._has_required_reaction_emoji_clean(value):
+            return value
+        return f"{value} 😭"
 
     def _generate_reply_comment(self, post_text: str, username: str = "") -> str:
         value = self._strip_publish_meta_lines(post_text or "")
@@ -906,7 +924,9 @@ class TwitterCollector:
                 continue
 
             options: List[str] = []
+            salvage_options: List[str] = []
             seen = set()
+            salvage_seen = set()
             for line in generated.splitlines():
                 cleaned = re.sub(r"^\s*[-*0-9.)]+\s*", "", line).strip()
                 cleaned = re.sub(r"\s+", " ", cleaned).strip(" \"'`")
@@ -917,20 +937,29 @@ class TwitterCollector:
                 word_count = len(cleaned.split())
                 if word_count < 2 or word_count > 10:
                     continue
-                if not self._has_required_reaction_emoji(cleaned):
+                lowered = cleaned.lower()
+                salvage_candidate = self._inject_required_reaction_emoji(cleaned)
+                salvage_lowered = salvage_candidate.lower()
+                if salvage_lowered not in salvage_seen and not self._is_bland_comment(salvage_candidate):
+                    salvage_seen.add(salvage_lowered)
+                    salvage_options.append(salvage_candidate)
+
+                if lowered in seen:
                     continue
+                cleaned = self._inject_required_reaction_emoji(cleaned)
                 if not self._is_relevant_comment(value, cleaned):
                     continue
                 if self._is_bland_comment(cleaned):
                     continue
-                lowered = cleaned.lower()
-                if lowered in seen:
-                    continue
-                seen.add(lowered)
+                seen.add(cleaned.lower())
                 options.append(cleaned)
 
             if options:
                 return options[hash_value % len(options)]
+            if salvage_options:
+                chosen = salvage_options[hash_value % len(salvage_options)]
+                print(f"[X][WARN] Using salvage comment candidate @{username or 'unknown'}: {chosen!r}")
+                return chosen
             print(
                 f"[X][WARN] Gemini comment generation returned unusable lines @{username or 'unknown'}: "
                 f"raw={generated[:300]!r}"
