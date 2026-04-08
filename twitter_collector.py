@@ -183,6 +183,35 @@ class TwitterCollector:
         self.openrouter_app_name = openrouter_app_name or "Catch Posts Bot"
         self._comment_ai_last_error = ""
 
+    def _normalize_source_post_text(self, text: str) -> str:
+        value = self.rewriter.clean_footer_text(text or "")
+        if not value:
+            return ""
+
+        lines = [line.strip() for line in value.splitlines()]
+        cleaned_lines: List[str] = []
+        money_emoji_run = re.compile(r"^(?:[\U0001F4B0\U0001FA99\U0001F4B8]\s*){3,}$", flags=re.UNICODE)
+        url_only = re.compile(r"^https?://\S+$", flags=re.IGNORECASE)
+
+        for line in lines:
+            if not line:
+                if cleaned_lines and cleaned_lines[-1]:
+                    cleaned_lines.append("")
+                continue
+            if url_only.match(line):
+                continue
+            if money_emoji_run.match(line):
+                continue
+            cleaned_lines.append(line)
+
+        value = "\n".join(cleaned_lines).strip()
+        value = re.sub(r"^https?://\S+\s+", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"^(?:[\U0001F4B0\U0001FA99\U0001F4B8]\s*){3,}", "", value, flags=re.UNICODE)
+        value = self.rewriter._strip_existing_hashtags(value)
+        value = re.sub(r"[ \t]{2,}", " ", value)
+        value = re.sub(r"\n{3,}", "\n\n", value)
+        return value.strip()
+
     def _twikit_disabled(self) -> bool:
         return time.time() < self._twikit_disabled_until_ts
 
@@ -1270,11 +1299,11 @@ class TwitterCollector:
             print(f"[X][SKIP] @{username} contains video media; not forwarding to main channel.")
             return
 
-        clean_text = self.rewriter.clean_footer_text(text)
+        clean_text = self._normalize_source_post_text(text)
         if clean_text and (self.rewriter.enabled or self.openrouter_api_key):
             rewritten = await asyncio.to_thread(self._rewrite_tweet_text, clean_text)
             if rewritten:
-                clean_text = self.rewriter.clean_footer_text(rewritten)
+                clean_text = self._normalize_source_post_text(rewritten)
         clean_text = self._strip_author_profile_links(clean_text, username)
         score_input = clean_text or (text or "")
         hype_score = await asyncio.to_thread(self.rewriter.get_hype_score, score_input)
