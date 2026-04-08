@@ -701,17 +701,27 @@ class TwitterCollector:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def _build_x_compose_url(clean_text: str, media_urls: List[str]) -> str:
+    def _build_bluesky_compose_url(clean_text: str, media_urls: List[str]) -> str:
         text = (clean_text or "").strip()
         if text:
             text = f"{text}\n\nMore updates in Telegram (link in bio)"
         else:
             text = "More updates in Telegram (link in bio)"
-        # Keep URL length safer for intent endpoint.
-        if len(text) > 1200:
-            text = text[:1197].rstrip() + "..."
+        # Bluesky compose intents are much shorter than X drafts.
+        if len(text) > 280:
+            text = text[:277].rstrip() + "..."
         encoded = parse.quote_plus(text)
-        return f"https://x.com/intent/tweet?text={encoded}"
+        return f"https://bsky.app/intent/compose?text={encoded}"
+
+    @staticmethod
+    def _build_bluesky_comment_url(reply_text: str) -> str:
+        text = (reply_text or "").strip().rstrip(".")
+        if not text:
+            return ""
+        if len(text) > 280:
+            text = text[:277].rstrip() + "..."
+        encoded = parse.quote_plus(text)
+        return f"https://bsky.app/intent/compose?text={encoded}"
 
     @staticmethod
     def _build_tweet_url(username: str, tweet_id: Any) -> str:
@@ -724,13 +734,13 @@ class TwitterCollector:
     def _build_publish_buttons_for_job(self, token: str, job: Dict[str, Any]) -> Optional[List[List[Any]]]:
         row: List[Any] = []
         clean_channel = str(job.get("clean_channel") or "")
-        x_compose_url = str(job.get("x_compose_url") or "")
+        bluesky_compose_url = str(job.get("bluesky_compose_url") or "")
         comment_url = str(job.get("comment_url") or "")
 
         if clean_channel and clean_channel != forward_to_channel:
             row.append(Button.inline("TELEGRAM", data=f"pub:{token}".encode("utf-8")))
-        if x_compose_url:
-            row.append(Button.url("X", x_compose_url))
+        if bluesky_compose_url:
+            row.append(Button.url("Bluesky", bluesky_compose_url))
         if comment_url:
             row.append(Button.url("Comment", comment_url))
         return [row] if row else None
@@ -1325,16 +1335,14 @@ class TwitterCollector:
             publish_buttons = None
             publish_token = None
             comment_text = await asyncio.to_thread(self._generate_reply_comment, clean_text or text or "", username)
-            comment_url = self._build_x_reply_url(tweet_id=tweet_id, reply_text=comment_text)
-            if not comment_url:
-                comment_url = self._build_tweet_url(username=username, tweet_id=tweet_id)
+            comment_url = self._build_bluesky_comment_url(comment_text)
             if self.clean_forward_channel or comment_url:
                 publish_token = uuid.uuid4().hex[:16]
-                x_compose_url = self._build_x_compose_url((clean_text or "").strip(), media_urls)
+                bluesky_compose_url = self._build_bluesky_compose_url((clean_text or "").strip(), media_urls)
                 row = []
                 if self.clean_forward_channel and self.clean_forward_channel != forward_to_channel:
                     row.append(Button.inline("TELEGRAM", data=f"pub:{publish_token}".encode("utf-8")))
-                row.append(Button.url("X", x_compose_url))
+                row.append(Button.url("Bluesky", bluesky_compose_url))
                 if comment_url:
                     row.append(Button.url("Comment", comment_url))
                 publish_buttons = [row] if row else None
@@ -1362,7 +1370,7 @@ class TwitterCollector:
                     "username": username,
                     "hype_score": hype_score,
                     "clean_channel": self.clean_forward_channel,
-                    "x_compose_url": x_compose_url,
+                    "bluesky_compose_url": bluesky_compose_url,
                     "comment_url": comment_url,
                     "published": False,
                     "created_ts": time.time(),

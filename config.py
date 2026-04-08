@@ -82,5 +82,19 @@ twitter_account_password = os.getenv("TWITTER_ACCOUNT_PASSWORD", "").strip()
 twitter_account_email = os.getenv("TWITTER_ACCOUNT_EMAIL", "").strip()
 twitter_account_email_password = os.getenv("TWITTER_ACCOUNT_EMAIL_PASSWORD", "").strip()
 
+# Bluesky collector settings
+bluesky_enabled = os.getenv("BLUESKY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+bluesky_identifiers = [
+    x.strip().lstrip("@")
+    for x in os.getenv("BLUESKY_IDENTIFIERS", "").split(",")
+    if x.strip()
+]
+bluesky_poll_seconds = int(os.getenv("BLUESKY_POLL_SECONDS", "600"))
+bluesky_fetch_limit = int(os.getenv("BLUESKY_FETCH_LIMIT", "1"))
+bluesky_min_hype_score = int(os.getenv("BLUESKY_MIN_HYPE_SCORE", "5"))
+bluesky_clean_forward_channel = os.getenv("BLUESKY_CLEAN_FORWARD_CHANNEL", "").strip()
+bluesky_clean_min_hype_score = int(os.getenv("BLUESKY_CLEAN_MIN_HYPE_SCORE", "6"))
+bluesky_bot_session_name = os.getenv("BLUESKY_BOT_SESSION_NAME", "bluesky_forwarder_bot").strip()
+
 DB_PATH = BASE_DIR / "database.db"
 MEDIA_DIR = BASE_DIR / "media"
